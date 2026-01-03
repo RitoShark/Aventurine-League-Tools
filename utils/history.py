@@ -48,14 +48,17 @@ def save_history_json(skn_list, anm_list):
 
 def get_addon_preferences(context):
     """Safely get addon preferences"""
-    # Try the hardcoded name first
-    package_name = "io_scene_lol"
+    # Get the actual package name dynamically from this module's parent
+    # __name__ is something like "Aventurine-League-Tools-main.utils.history"
+    # We want just "Aventurine-League-Tools-main"
+    package_name = __name__.split('.')[0]
+    
     if package_name in context.preferences.addons:
         return context.preferences.addons[package_name].preferences
-        
-    # Try finding by module name if installed differently
+    
+    # Fallback: search for Aventurine in addon names
     for name in context.preferences.addons.keys():
-        if "lol" in name.lower() and "io_scene" in name.lower():
+        if "aventurine" in name.lower():
             return context.preferences.addons[name].preferences
     
     return None
