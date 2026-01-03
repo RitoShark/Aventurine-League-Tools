@@ -68,7 +68,7 @@ class LolAddonPreferences(bpy.types.AddonPreferences):
     skn_history: CollectionProperty(type=history.LOLHistoryItem)
     anm_history: CollectionProperty(type=history.LOLHistoryItem)
     show_skn_history: BoolProperty(default=False, options={'SKIP_SAVE'})
-
+    show_anm_history: BoolProperty(default=False, options={'SKIP_SAVE'})
     
     # Updater Properties
     repo_owner: StringProperty(
