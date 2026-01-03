@@ -1,7 +1,7 @@
 import bpy
 import os
 import glob
-from .LtMAO import pyRitoFile, Ritoddstex
+from ..LtMAO import pyRitoFile, Ritoddstex
 
 def find_bin_and_read(skn_path):
     # Try to find a bin file nearby
@@ -204,13 +204,25 @@ def import_textures(skn_object, skn_path):
         return
 
     # Check for texconv.exe once
-    addon_dir = os.path.dirname(os.path.realpath(__file__))
+    # texture_manager.py is in utils/, so addon root is one level up
+    utils_dir = os.path.dirname(os.path.realpath(__file__))
+    addon_dir = os.path.dirname(utils_dir)  # Go up to addon root
+    
     texconv_path = os.path.join(addon_dir, 'texconv.exe')
     if not os.path.exists(texconv_path):
+        # Try in utils dir as fallback
+        possible = os.path.join(utils_dir, 'texconv.exe')
+        if os.path.exists(possible): 
+            texconv_path = possible
+        else:
+            # Try LtMAO subfolder
             possible = os.path.join(addon_dir, 'LtMAO', 'res', 'tools', 'texconv.exe')
             if os.path.exists(possible): texconv_path = possible
     
     has_texconv = os.path.exists(texconv_path)
+
+    # Cache for already loaded textures to avoid re-reading the same file
+    loaded_textures = {}  # local_path -> bpy_image
 
     for mat in skn_object.data.materials:
         clean_name = mat.name.split('.')[0]
@@ -234,6 +246,38 @@ def import_textures(skn_object, skn_path):
                  if local_path: break
 
         if local_path:
+            # Check cache first
+            if local_path in loaded_textures:
+                bpy_image = loaded_textures[local_path]
+                # Assign cached texture to this material
+                if bpy_image and hasattr(mat, "node_tree") and mat.node_tree:
+                    nodes = mat.node_tree.nodes
+                    links = mat.node_tree.links
+                    
+                    bsdf = None
+                    for n in nodes:
+                        if n.type == 'BSDF_PRINCIPLED':
+                            bsdf = n
+                            break
+                    
+                    if not bsdf:
+                        nodes.clear()
+                        output = nodes.new('ShaderNodeOutputMaterial')
+                        output.location = (200, 0)
+                        bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+                        bsdf.location = (0, 0)
+                        links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
+
+                    tex_node = nodes.new('ShaderNodeTexImage')
+                    tex_node.location = (-300, 0)
+                    tex_node.image = bpy_image
+                    
+                    if not bsdf.inputs['Base Color'].is_linked:
+                        links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
+                        
+                    print(f"LtMAO: Reused cached {bpy_image.name} for {mat.name}")
+                continue
+            
             bpy_image = None
             use_texconv_for_this = has_texconv
             
@@ -331,6 +375,9 @@ def import_textures(skn_object, skn_path):
 
             # --- Assignment ---
             if bpy_image:
+                # Add to cache for reuse
+                loaded_textures[local_path] = bpy_image
+                
                 if hasattr(mat, "node_tree") and mat.node_tree:
                     nodes = mat.node_tree.nodes
                     links = mat.node_tree.links
