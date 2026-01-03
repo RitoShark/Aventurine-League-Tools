@@ -19,13 +19,12 @@ class LOL_OT_CheckForUpdates(bpy.types.Operator):
     bl_description = "Check GitHub for the latest version of Aventurine League Tools"
     
     def execute(self, context):
-        prefs = context.preferences.addons[__package__].preferences
-        repo_owner = prefs.repo_owner
-        repo_name = prefs.repo_name
+        # Fix for finding preferences when package name varies
+        addon_name = __package__.split('.')[0]
+        prefs = context.preferences.addons[addon_name].preferences
         
-        if not repo_owner or not repo_name:
-            self.report({'ERROR'}, "Please set Repository Owner and Name in preferences")
-            return {'CANCELLED'}
+        repo_owner = "RitoShark"
+        repo_name = "Aventurine-League-Tools"
             
         print(f"[Aventurine] Checking for updates from {repo_owner}/{repo_name}...")
         
@@ -60,7 +59,8 @@ class LOL_OT_CheckForUpdates(bpy.types.Operator):
                 print(f"[Aventurine] Current: {current_version}, Latest: {new_version}")
 
                 if new_version > current_version:
-                    prefs = bpy.context.preferences.addons[__package__].preferences
+                    addon_name = __package__.split('.')[0]
+                    prefs = bpy.context.preferences.addons[addon_name].preferences
                     prefs.update_available = True
                     prefs.latest_version_str = tag_name
                     prefs.download_url = data.get('zipball_url', '') 
@@ -73,9 +73,29 @@ class LOL_OT_CheckForUpdates(bpy.types.Operator):
                     
                     print(f"[Aventurine] Update available! {prefs.download_url}")
                 else:
-                    prefs = bpy.context.preferences.addons[__package__].preferences
+                    addon_name = __package__.split('.')[0]
+                    prefs = bpy.context.preferences.addons[addon_name].preferences
                     prefs.update_available = False
-                    print(f"[Aventurine] Up to date.")
+                    # Allow redownload anyway?
+                    print(f"[Aventurine] Up to date (or user can force redownload).")
+                    # We can store the URL anyway so the "Install Update" button could technically work if we exposed it,
+                    # but for now let's just properly report status.
+                    # Actually, user requested "user can just redownload anyways".
+                    # Let's say we set update_available = True so the button appears even if same version?
+                    # Or we change the logic in the UI. 
+                    # Simpler: Just ALWAYS set update_available = True if we found a valid release, 
+                    # but maybe change the text?
+                    # Let's just set the URL and let the user decide.
+                    prefs.latest_version_str = tag_name + " (Re-download)"
+                    prefs.download_url = data.get('zipball_url', '')
+                    assets = data.get('assets', [])
+                    for asset in assets:
+                         if asset['name'].endswith('.zip'):
+                             prefs.download_url = asset['browser_download_url']
+                             break
+                    
+                    # If we want to allow force update, we set update_available = True
+                    prefs.update_available = True
 
         except Exception as e:
             print(f"[Aventurine] Update check failed: {e}")
@@ -86,7 +106,8 @@ class LOL_OT_UpdateAddon(bpy.types.Operator):
     bl_description = "Download and install the latest version"
     
     def execute(self, context):
-        prefs = context.preferences.addons[__package__].preferences
+        addon_name = __package__.split('.')[0]
+        prefs = context.preferences.addons[addon_name].preferences
         url = prefs.download_url
         
         if not url:
@@ -100,6 +121,9 @@ class LOL_OT_UpdateAddon(bpy.types.Operator):
 
     def install_update_thread(self, context, url):
         import tempfile
+        import zipfile
+        import shutil
+        import time
         
         try:
             print(f"[Aventurine] Downloading update from {url}...")
@@ -110,27 +134,93 @@ class LOL_OT_UpdateAddon(bpy.types.Operator):
                 
             tmp_dir = tempfile.gettempdir()
             zip_path = os.path.join(tmp_dir, "aventurine_update.zip")
+            extract_dir = os.path.join(tmp_dir, "aventurine_extract")
             
             with open(zip_path, 'wb') as f:
                 f.write(data)
                 
             print(f"[Aventurine] Downloaded to {zip_path}")
             
-            def install_on_main():
+            # Installation needs to happen carefully
+            # We can't use bpy.ops.preferences.addon_install because it misnames the folder
+            
+            def perform_install():
                 try:
-                    bpy.ops.preferences.addon_install(overwrite=True, filepath=zip_path)
+                    # 1. Extract
+                    if os.path.exists(extract_dir):
+                        shutil.rmtree(extract_dir, ignore_errors=True)
+                    os.makedirs(extract_dir, exist_ok=True)
                     
-                    prefs = bpy.context.preferences.addons[__package__].preferences
-                    prefs.update_available = False
-                    prefs.latest_version_str = "Updated! Please Restart Blender."
+                    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                        zip_ref.extractall(extract_dir)
+                        
+                    # 2. Find the inner folder (Github release zips usually have one root folder)
+                    inner_items = os.listdir(extract_dir)
+                    source_path = None
+                    for item in inner_items:
+                        item_path = os.path.join(extract_dir, item)
+                        if os.path.isdir(item_path):
+                            # Verify it looks like an addon (has __init__.py)
+                            if "__init__.py" in os.listdir(item_path):
+                                source_path = item_path
+                                break
                     
-                    bpy.ops.wm.save_userpref()
+                    if not source_path:
+                        print("[Aventurine] Update failed: Could not find valid addon in zip")
+                        return
+
+                    # 3. Identify Target Directory
+                    # We want to maintain the current folder name so it stays enabled
+                    addon_name = __package__.split('.')[0]
+                    addons_dir = bpy.utils.user_resource('SCRIPTS', path="addons")
+                    target_path = os.path.join(addons_dir, addon_name)
                     
+                    print(f"Target: {target_path}")
+                    
+                    # 4. Swap Folders
+                    # Rename current to _old (Windows allows renaming used folders usually)
+                    backup_path = os.path.join(addons_dir, f"{addon_name}_old_{int(time.time())}")
+                    
+                    if os.path.exists(target_path):
+                        try:
+                            os.rename(target_path, backup_path)
+                        except Exception as e:
+                            print(f"Could not rename current addon folder: {e}. Trying overwrite...")
+                            # If rename fails, we resort to copytree over it
+                            shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+                            backup_path = None # No backup created
+                    
+                    if backup_path and os.path.exists(backup_path):
+                        # Move new to target
+                        shutil.move(source_path, target_path)
+                        
+                        # Try to remove backup (might fail if files are locked)
+                        try:
+                            shutil.rmtree(backup_path) 
+                        except:
+                            print(f"[Aventurine] Could not fully remove backup {backup_path} (files in use). You can delete it manually later.")
+                            
+                    # 5. Success UI Update
+                    def update_ui():
+                        addon_name_ui = __package__.split('.')[0]
+                        prefs = bpy.context.preferences.addons[addon_name_ui].preferences
+                        prefs.update_available = False
+                        prefs.latest_version_str = "UPDATED! PLEASE RESTART BLENDER."
+                        
+                        # Trigger save so enabled state persists
+                        bpy.ops.wm.save_userpref()
+                        
+                    bpy.app.timers.register(update_ui, first_interval=0.1)
                     print(f"[Aventurine] Update installed successfully.")
+                    
                 except Exception as e:
                     print(f"[Aventurine] Install failed: {e}")
-            
-            bpy.app.timers.register(install_on_main, first_interval=0.1)
+                    import traceback
+                    traceback.print_exc()
+
+            # Run install logic immediately (file ops don't need main thread usually, 
+            # but modifying addon folder might be safer? No, standard python file ops are fine)
+            perform_install()
 
         except Exception as e:
             print(f"[Aventurine] Update download failed: {e}")
