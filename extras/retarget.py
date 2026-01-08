@@ -393,7 +393,8 @@ class LOL_PT_RetargetPanel(Panel):
     bl_idname = "VIEW3D_PT_lol_retarget"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'LoL Retarget'
+    bl_category = 'Animation Tools'
+    bl_options = {'DEFAULT_CLOSED'}
     
     def draw_header(self, context):
         layout = self.layout

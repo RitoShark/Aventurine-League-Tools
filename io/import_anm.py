@@ -4,6 +4,7 @@ import mathutils
 import math
 import os
 from ..utils.binary_utils import BinaryStream, Vector, Quaternion, Hash
+from . import import_skl
 
 
 class ANMPose:
@@ -124,7 +125,7 @@ def read_anm(filepath):
                     tx = (translation_max.x - translation_min.x) / 65535.0 * (v[0] | (v[1] << 8)) + translation_min.x
                     ty = (translation_max.y - translation_min.y) / 65535.0 * (v[2] | (v[3] << 8)) + translation_min.y
                     tz = (translation_max.z - translation_min.z) / 65535.0 * (v[4] | (v[5] << 8)) + translation_min.z
-                    pose.translation = mathutils.Vector((tx, ty, tz))
+                    pose.translation = mathutils.Vector((tx, ty, tz)) * import_skl.IMPORT_SCALE
                 elif transform_type == 2: # Scale
                     v = compressed_transform
                     sx = (scale_max.x - scale_min.x) / 65535.0 * (v[0] | (v[1] << 8)) + scale_min.x
@@ -153,7 +154,7 @@ def read_anm(filepath):
                 if not isinstance(joint_hashes, (list, tuple)):
                     joint_hashes = [joint_hashes]
                 
-                # Vector palette
+                # Vector palette (DO NOT scale here - used for both translation AND scale)
                 bs.seek(vecs_offset + 12)
                 vec_count = (quats_offset - vecs_offset) // 12
                 vec_palette = [mathutils.Vector(bs.read_float(3)) for _ in range(vec_count)]
@@ -172,8 +173,8 @@ def read_anm(filepath):
                     for t in range(track_count):
                         trans_idx, scale_idx, rot_idx = bs.read_uint16(3)
                         pose = ANMPose()
-                        pose.translation = vec_palette[trans_idx]
-                        pose.scale = vec_palette[scale_idx]
+                        pose.translation = vec_palette[trans_idx] * import_skl.IMPORT_SCALE  # Scale only translation
+                        pose.scale = vec_palette[scale_idx]  # Scale values stay as-is
                         pose.rotation = quat_palette[rot_idx]
                         anm.tracks[t].poses[f] = pose
 
@@ -188,7 +189,7 @@ def read_anm(filepath):
                 bs.pad(12)
                 vecs_offset, quats_offset, frames_offset = bs.read_int32(3)
                 
-                # Vector palette
+                # Vector palette (DO NOT scale here - used for both translation AND scale)
                 bs.seek(vecs_offset + 12)
                 vec_count = (quats_offset - vecs_offset) // 12
                 vec_palette = [mathutils.Vector(bs.read_float(3)) for _ in range(vec_count)]
@@ -216,8 +217,8 @@ def read_anm(filepath):
                             anm.tracks.append(track)
                         
                         pose = ANMPose()
-                        pose.translation = vec_palette[trans_idx]
-                        pose.scale = vec_palette[scale_idx]
+                        pose.translation = vec_palette[trans_idx] * import_skl.IMPORT_SCALE  # Scale only translation
+                        pose.scale = vec_palette[scale_idx]  # Scale values stay as-is
                         pose.rotation = quat_palette[rot_idx]
                         hash_to_track[joint_hash].poses[f] = pose
             else:
@@ -243,7 +244,7 @@ def read_anm(filepath):
                         t = bs.read_float(3)
                         pose = ANMPose()
                         pose.rotation = mathutils.Quaternion((q[3], q[0], q[1], q[2]))
-                        pose.translation = mathutils.Vector(t)
+                        pose.translation = mathutils.Vector(t) * import_skl.IMPORT_SCALE
                         pose.scale = mathutils.Vector((1, 1, 1))
                         track.poses[f_id] = pose
 
@@ -272,7 +273,7 @@ def read_anm(filepath):
                     t = bs.read_float(3)
                     pose = ANMPose()
                     pose.rotation = mathutils.Quaternion((q[3], q[0], q[1], q[2]))
-                    pose.translation = mathutils.Vector(t)
+                    pose.translation = mathutils.Vector(t) * import_skl.IMPORT_SCALE
                     pose.scale = mathutils.Vector((1, 1, 1))
                     track.poses[f_id] = pose
     
@@ -320,28 +321,38 @@ def apply_anm(anm, armature_obj, frame_offset=0):
         if pb.name in native_global_rest:
             return native_global_rest[pb.name]
         
-        # Get Native Bind Local (in Blender Space)
+        # Get Native Bind Local components (stored in RAW League space)
         nb_t = pb.get("native_bind_t")
         if nb_t:
-             # Tuple to Vector
-            n_t = mathutils.Vector(nb_t)
-            n_r = mathutils.Quaternion(pb.get("native_bind_r"))
+            # These are RAW League values, need to build League matrix then convert to Blender
+            n_t_raw = mathutils.Vector(nb_t)
+            n_r_raw = mathutils.Quaternion(pb.get("native_bind_r"))
             s_val = pb.get("native_bind_s")
-            n_s = mathutils.Vector(s_val) if s_val else mathutils.Vector((1,1,1))
+            n_s_raw = mathutils.Vector(s_val) if s_val else mathutils.Vector((1,1,1))
+            
+            # Build matrix in League space (T * R * S)
+            lm_t = mathutils.Matrix.Translation(n_t_raw)
+            lm_r = n_r_raw.to_matrix().to_4x4()
+            lm_s = mathutils.Matrix.Diagonal((n_s_raw.x, n_s_raw.y, n_s_raw.z, 1.0))
+            league_mat = lm_t @ lm_r @ lm_s
+            
+            # Convert to Blender space: P @ League @ P_inv
+            n_local_B = P @ league_mat @ P_inv
         else:
-            # Fallback to current bind props (approximate)
-            n_t = mathutils.Vector((-pb.get("bind_translation").x, pb.get("bind_translation").z, -pb.get("bind_translation").y))
-            # Just use Identity for rot fallback if critical fail, but usually bind_quat works
-            n_r = mathutils.Quaternion((1,0,0,0)) 
-            n_s = mathutils.Vector((1,1,1))
-
-        # Build Native Local Matrix in Blender Space (P @ M @ P_inv)
-        # N_local_B = P @ LocRotScale(nt, nr, ns) @ P_inv
-        lm_t = mathutils.Matrix.Translation((n_t.x, n_t.y, n_t.z))
-        lm_r = n_r.to_matrix().to_4x4()
-        lm_s = mathutils.Matrix.Diagonal((n_s.x, n_s.y, n_s.z, 1.0))
-        n_raw_mat = lm_t @ lm_r @ lm_s
-        n_local_B = P @ n_raw_mat @ P_inv
+            # Fallback: use the Blender bind pose directly
+            # bind_translation/rotation/scale are already in Blender space
+            bind_t = pb.get("bind_translation")
+            bind_r = pb.get("bind_rotation")
+            bind_s = pb.get("bind_scale")
+            
+            if bind_t and bind_r and bind_s:
+                lm_t = mathutils.Matrix.Translation(bind_t)
+                lm_r = bind_r.to_matrix().to_4x4()
+                lm_s = mathutils.Matrix.Diagonal((bind_s.x, bind_s.y, bind_s.z, 1.0))
+                n_local_B = lm_t @ lm_r @ lm_s
+            else:
+                # Ultimate fallback - identity
+                n_local_B = mathutils.Matrix.Identity(4)
 
         # Calc Global
         if pb.parent:

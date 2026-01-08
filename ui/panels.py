@@ -22,7 +22,8 @@ class LOL_PT_MainPanel(Panel):
         # SKN+SKL section
         box = layout.box()
         box.label(text="SKN+SKL", icon='MESH_DATA')
-        row = box.row()
+        row = box.row(align=True)
+        row.scale_y = 1.2
         row.operator("import_scene.skn", text="Import", icon='IMPORT')
         row.operator("export_scene.skn", text="Export", icon='EXPORT')
         
@@ -32,7 +33,8 @@ class LOL_PT_MainPanel(Panel):
         # ANM section
         box = layout.box()
         box.label(text="ANM", icon='ANIM')
-        row = box.row()
+        row = box.row(align=True)
+        row.scale_y = 1.2
         row.operator("import_scene.anm", text="Import", icon='IMPORT')
         row.operator("export_scene.anm", text="Export", icon='EXPORT')
         
@@ -42,17 +44,76 @@ class LOL_PT_MainPanel(Panel):
         # SCB section
         box = layout.box()
         box.label(text="SCB (Static Objects)", icon='MESH_CUBE')
-        row = box.row()
+        row = box.row(align=True)
+        row.scale_y = 1.2
         row.operator("import_scene.scb", text="Import", icon='IMPORT')
         row.operator("export_scene.scb", text="Export", icon='EXPORT')
         
         # SCO section
         box = layout.box()
         box.label(text="SCO (Static Objects with Pivot)", icon='BONE_DATA')
-        row = box.row()
+        row = box.row(align=True)
+        row.scale_y = 1.2
         row.operator("import_scene.sco", text="Import", icon='IMPORT')
         row.operator("export_scene.sco", text="Export", icon='EXPORT')
         
+        # Mesh Tools section
+        box = layout.box()
+        box.label(text="Mesh Tools", icon='MODIFIER')
+        
+        # Show normals button (always available)
+        row = box.row(align=True)
+        row.scale_y = 1.2
+        row.operator("mesh.show_normals", text="Show Face Orientation", icon='NORMALS_FACE')
+        
+        # Check if we're in edit mode with a mesh
+        in_edit_mode = context.mode == 'EDIT_MESH'
+        
+        # Recalculate buttons - always visible, grayed out if not in edit mode
+        row = box.row(align=True)
+        row.scale_y = 1.2
+        row.enabled = in_edit_mode
+        row.operator("mesh.recalculate_normals_inside", text="Inside")
+        row.operator("mesh.recalculate_normals_outside", text="Outside")
+        
+        # Reverse button - always visible, grayed out if not in edit mode
+        row = box.row(align=True)
+        row.scale_y = 1.2
+        row.enabled = in_edit_mode
+        row.operator("mesh.flip_normals_selected", text="Reverse Normals")
+
+        # Bind Pose section - always visible, enabled only in Pose mode with armature
+        box = layout.box()
+        box.label(text="Bind Pose", icon='ARMATURE_DATA')
+        
+        # Check if we're in pose mode with an armature
+        in_pose_mode = (context.active_object and 
+                       context.active_object.type == 'ARMATURE' and
+                       context.mode == 'POSE')
+        
+        # Check if bind pose is saved
+        has_bind_pose = False
+        if context.active_object and context.active_object.type == 'ARMATURE':
+            has_bind_pose = "lol_bind_pose" in context.active_object
+        
+        row = box.row(align=True)
+        row.scale_y = 1.2
+        
+        # Go to Bind Pose button - enabled only in pose mode and if bind pose exists
+        row.enabled = in_pose_mode and has_bind_pose
+        row.operator("pose.go_to_bind_pose", text="Go to Bind Pose", icon='RECOVER_LAST')
+        
+        # Set New Bind Pose button - enabled only in pose mode
+        row = box.row(align=True)
+        row.scale_y = 1.2
+        row.enabled = in_pose_mode
+        row.operator("pose.set_bind_pose", text="Set New Bind Pose", icon='KEYFRAME_HLT')
+        
+        # Show status
+        if has_bind_pose:
+            box.label(text="✓ Bind pose saved", icon='CHECKMARK')
+        else:
+            box.label(text="No bind pose set", icon='INFO')
 
         
         # Show metadata if armature is selected
@@ -67,9 +128,11 @@ class LOL_PT_MainPanel(Panel):
         # Texture section
         box = layout.box()
         box.label(text="Textures", icon='TEXTURE')
-        row = box.row()
+        row = box.row(align=True)
+        row.scale_y = 1.2
         row.operator("lol.save_textures", text="Save All", icon='DISK_DRIVE')
         row.operator("lol.reload_textures", text="Reload All", icon='FILE_REFRESH')
+
 
 
 class UV_CORNER_PT_panel(Panel):

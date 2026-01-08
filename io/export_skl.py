@@ -2,6 +2,7 @@ import bpy
 import mathutils
 import os
 from ..utils.binary_utils import BinaryStream, Hash
+from . import import_skl
 
 def write_skl(filepath, armature_obj):
     """Write Blender armature to SKL file (Version 0)"""
@@ -122,7 +123,9 @@ def write_skl(filepath, armature_obj):
             # Local Transform (TRS)
             l_t, l_r, l_s = l_mat_local.decompose()
             
-            bs.write_vec3(l_t)
+            # Scale translations back to game units (native_bind_t is at 0.01 scale)
+            scale = import_skl.EXPORT_SCALE
+            bs.write_vec3(l_t * scale)
             bs.write_vec3(l_s)
             bs.write_quat(l_r)
             
@@ -130,7 +133,7 @@ def write_skl(filepath, armature_obj):
             ig_mat = l_mat_global.inverted()
             ig_t, ig_r, ig_s = ig_mat.decompose()
             
-            bs.write_vec3(ig_t)
+            bs.write_vec3(ig_t * scale)
             bs.write_vec3(ig_s)
             bs.write_quat(ig_r)
             

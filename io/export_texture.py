@@ -33,14 +33,15 @@ class LOL_OT_SaveTextures(bpy.types.Operator):
              self.report({'WARNING'}, "No textures found on selected objects.")
              return {'CANCELLED'}
 
-        # Check for texconv.exe in addon folder
-        addon_dir = os.path.dirname(os.path.realpath(__file__))
+        # Check for texconv.exe in addon folder (root of addon, not io subfolder)
+        addon_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # Go up from io/ to addon root
         texconv_path = os.path.join(addon_dir, 'texconv.exe')
         use_texconv = os.path.exists(texconv_path)
         
         if not use_texconv:
-            # Check LtMAO tools
-            possible_path = os.path.join(addon_dir, 'LtMAO', 'res', 'tools', 'texconv.exe') # Hypothetical
+            # Fallback: Check in io folder (legacy)
+            io_dir = os.path.dirname(os.path.realpath(__file__))
+            possible_path = os.path.join(io_dir, 'texconv.exe')
             if os.path.exists(possible_path):
                 texconv_path = possible_path
                 use_texconv = True
@@ -148,10 +149,12 @@ class LOL_OT_ReloadTextures(bpy.types.Operator):
         converted_count = 0
         
         # Check for texconv (for potential re-conversion)
-        addon_dir = os.path.dirname(os.path.realpath(__file__))
+        addon_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # Go up from io/ to addon root
         texconv_path = os.path.join(addon_dir, 'texconv.exe')
         if not os.path.exists(texconv_path):
-             possible = os.path.join(addon_dir, 'LtMAO', 'res', 'tools', 'texconv.exe')
+             # Fallback: Check in io folder (legacy)
+             io_dir = os.path.dirname(os.path.realpath(__file__))
+             possible = os.path.join(io_dir, 'texconv.exe')
              if os.path.exists(possible): texconv_path = possible
         
         use_texconv = os.path.exists(texconv_path)

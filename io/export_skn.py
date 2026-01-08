@@ -4,6 +4,7 @@ import struct
 import os
 import re
 from ..utils.binary_utils import BinaryStream
+from . import import_skl
 
 def clean_blender_name(name):
     """Remove Blender's .001, .002 etc. suffixes from names"""
@@ -44,9 +45,10 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name):
                 new_v_idx = len(submesh_vertices)
                 vert_map[key] = new_v_idx
                 
-                # Armature-Local Position -> League Space
+                # Armature-Local Position -> League Space (scaled back to game units)
                 v_B = world_to_armature @ mesh.vertices[vert_idx].co
-                v_L = mathutils.Vector((-v_B.x, v_B.z, -v_B.y))
+                scale = import_skl.EXPORT_SCALE
+                v_L = mathutils.Vector((-v_B.x * scale, v_B.z * scale, -v_B.y * scale))
 
                 
                 n_A = (world_to_armature.to_3x3() @ normal_B).normalized()

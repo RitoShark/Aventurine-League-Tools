@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (1, 2, 0),
+    "version": (1, 3, 0),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -17,6 +17,8 @@ from .ui import icons
 from .tools import updater
 from .tools import limit_influences
 from .tools import uv_corners
+from .tools import normals
+from .tools import bind_pose
 from .io import export_scb
 from .io import export_sco
 from .utils import history
@@ -44,6 +46,29 @@ def update_retarget(self, context):
     except Exception as e:
         print(f"Error toggling retarget: {e}")
 
+def update_animation_tools(self, context):
+    """Master toggle for Animation Tools - enables/disables both physics and retarget"""
+    try:
+        if self.enable_animation_tools:
+            # Enable both sub-panels
+            self.enable_physics = True
+            self.enable_retarget = True
+        else:
+            # Disable both sub-panels
+            self.enable_physics = False
+            self.enable_retarget = False
+    except Exception as e:
+        print(f"Error toggling animation tools: {e}")
+
+def update_smart_weights(self, context):
+    try:
+        if self.enable_smart_weights:
+            smart_weights.register_panel()
+        else:
+            smart_weights.unregister_panel()
+    except Exception as e:
+        print(f"Error toggling smart weights: {e}")
+
 def get_preferences(context):
     return context.preferences.addons[__package__].preferences
 
@@ -51,18 +76,32 @@ class LolAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __package__
     
     # Feature Toggles
+    enable_animation_tools: BoolProperty(
+        name="Enable Animation Tools",
+        description="Show the Animation Tools panel (Physics and Retargeting)",
+        default=False,
+        update=update_animation_tools
+    )
+    
     enable_physics: BoolProperty(
-        name="Enable League Physics",
+        name="League Physics",
         description="Enable the physics simulation panel (based on Wiggle 2)",
         default=False,
         update=update_physics
     )
     
     enable_retarget: BoolProperty(
-        name="Enable Retargeting",
+        name="Animation Retargeting",
         description="Enable the animation retargeting panel",
         default=False,
         update=update_retarget
+    )
+    
+    enable_smart_weights: BoolProperty(
+        name="Enable Skin Tools",
+        description="Show the Skin Tools panel (Smart Weights) in the N menu",
+        default=True,
+        update=update_smart_weights
     )
     
     # History Properties (Moved from history.py)
@@ -95,8 +134,16 @@ class LolAddonPreferences(bpy.types.AddonPreferences):
 
         box = layout.box()
         box.label(text="Optional Features:")
-        box.prop(self, "enable_physics")
-        box.prop(self, "enable_retarget")
+        
+        # Skin Tools (Smart Weights)
+        box.prop(self, "enable_smart_weights")
+        
+        # Animation Tools
+        box.prop(self, "enable_animation_tools", text="Animation Tools")
+        if self.enable_animation_tools:
+            sub = box.box()
+            sub.prop(self, "enable_physics")
+            sub.prop(self, "enable_retarget")
         
         box = layout.box()
         box.label(text="History (Stored Automatically)")
@@ -460,6 +507,15 @@ def register():
     bpy.utils.register_class(uv_corners.UV_CORNER_OT_bottom_left)
     bpy.utils.register_class(uv_corners.UV_CORNER_OT_bottom_right)
     
+    # Register normals operators
+    bpy.utils.register_class(normals.MESH_OT_show_normals)
+    bpy.utils.register_class(normals.MESH_OT_recalculate_normals_outside)
+    bpy.utils.register_class(normals.MESH_OT_recalculate_normals_inside)
+    bpy.utils.register_class(normals.MESH_OT_flip_normals)
+    
+    # Register bind pose operators
+    bind_pose.register()
+    
     smart_weights.register()
 
     # Register UI Panels
@@ -492,6 +548,14 @@ def register():
     # We defer this slightly or wrap in try-except because on fresh install prefs might not exist
     try:
         prefs = bpy.context.preferences.addons[__package__].preferences
+        
+        # Smart Weights panel is enabled by default, but can be toggled off
+        if not prefs.enable_smart_weights:
+            try:
+                smart_weights.unregister_panel()
+            except Exception as e:
+                print(f"Failed to unregister smart weights panel: {e}")
+        
         if prefs.enable_physics:
             try:
                 from .extras import physics
@@ -540,6 +604,15 @@ def unregister():
     bpy.utils.unregister_class(uv_corners.UV_CORNER_OT_top_right)
     bpy.utils.unregister_class(uv_corners.UV_CORNER_OT_bottom_left)
     bpy.utils.unregister_class(uv_corners.UV_CORNER_OT_bottom_right)
+    
+    # Unregister normals operators
+    bpy.utils.unregister_class(normals.MESH_OT_show_normals)
+    bpy.utils.unregister_class(normals.MESH_OT_recalculate_normals_outside)
+    bpy.utils.unregister_class(normals.MESH_OT_recalculate_normals_inside)
+    bpy.utils.unregister_class(normals.MESH_OT_flip_normals)
+    
+    # Unregister bind pose operators
+    bind_pose.unregister()
     
     smart_weights.unregister()
     

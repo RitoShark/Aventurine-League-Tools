@@ -99,10 +99,12 @@ def read_skn(filepath):
 
 def create_mesh(indices, vertices, submeshes, name, armature_obj=None, joints=None, influences=None):
     # Coordinate system: X -> X, Y -> Z, Z -> -Y (Standing Up)
+    # Apply import scale (0.01) to match Maya/LtMAO units
+    scale = import_skl.IMPORT_SCALE
     verts = []
     for v in vertices:
         # Flip X to match Maya/Reliable import (Sword in left hand)
-        verts.append((-v.position.x, -v.position.z, v.position.y))
+        verts.append((-v.position.x * scale, -v.position.z * scale, v.position.y * scale))
     
     mesh = bpy.data.meshes.new(name)
     faces = [(indices[i], indices[i+1], indices[i+2]) for i in range(0, len(indices), 3)]
@@ -216,6 +218,21 @@ def load(operator, context, filepath, load_skl_file=True, split_by_material=Fals
         if armature_obj:
             armature_obj["lol_skn_filepath"] = filepath
             armature_obj["lol_skl_filepath"] = filepath.replace('.skn', '.skl')
+            
+            # Automatically save the import pose as the bind pose
+            import json
+            bind_pose_data = {}
+            for pose_bone in armature_obj.pose.bones:
+                # Store matrix_basis (local transformation) as a flat list (4x4 = 16 values)
+                # This is the local transformation relative to the parent bone
+                matrix = pose_bone.matrix_basis
+                matrix_list = []
+                for row in matrix:
+                    matrix_list.extend(row)
+                bind_pose_data[pose_bone.name] = matrix_list
+            
+            # Save to custom property as JSON
+            armature_obj["lol_bind_pose"] = json.dumps(bind_pose_data)
         
         operator.report({'INFO'}, f'Imported {len(vertices)} vertices')
         return {'FINISHED'}

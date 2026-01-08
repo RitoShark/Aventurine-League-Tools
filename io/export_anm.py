@@ -4,6 +4,7 @@ import struct
 import mathutils
 import math
 from ..utils.binary_utils import BinaryStream, Hash
+from . import import_skl
 
 def write_anm(filepath, armature_obj, fps=30.0):
     """Write Blender animation to ANM file (Uncompressed v4 format)"""
@@ -129,8 +130,8 @@ def write_anm(filepath, armature_obj, fps=30.0):
                 # t = mathutils.Vector((-t.x, t.y, t.z))
                 # r = mathutils.Quaternion((r.w, r.x, -r.y, -r.z))
                 
-                # Add to palettes
-                t_id = add_to_vec_palette(t)
+                # Add to palettes (scale translations back to game units)
+                t_id = add_to_vec_palette(t * import_skl.EXPORT_SCALE)
                 s_id = add_to_vec_palette(s)
                 r_id = add_to_quat_palette(r)
                 

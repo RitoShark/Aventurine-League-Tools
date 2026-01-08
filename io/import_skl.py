@@ -3,6 +3,10 @@ import bpy
 import mathutils
 from ..utils.binary_utils import BinaryStream
 
+# Scale factor to match Maya/LtMAO units (0.01 = 100x smaller)
+IMPORT_SCALE = 0.01
+EXPORT_SCALE = 1.0 / IMPORT_SCALE  # = 100, to scale back up for export
+
 
 class SKLJoint:
     __slots__ = ('name', 'parent', 'local_translation', 'local_scale', 'local_rotation', 'global_pos',
@@ -83,7 +87,7 @@ def read_skl(filepath):
                     b_mat = P @ l_mat @ P_inv
                     b_t, b_r, b_s = b_mat.decompose()
                     
-                    joint.local_translation = b_t
+                    joint.local_translation = b_t * IMPORT_SCALE
                     joint.local_rotation = b_r
                     joint.local_scale = b_s
                     
@@ -194,7 +198,9 @@ def create_armature(joints, name="Armature"):
         # These are what was read from the file before any coordinate conversion.
         # We store them as lists/tuples so they are easy to retrieve.
         # The rotation is stored as mathutils.Quaternion (w,x,y,z)
-        pbone["native_bind_t"] = [joint.raw_trans.x, joint.raw_trans.y, joint.raw_trans.z]
+        # Scale native_bind_t to match visual bones (both at 0.01 scale)
+        # This is required for correction matrix math to work correctly
+        pbone["native_bind_t"] = [joint.raw_trans.x * IMPORT_SCALE, joint.raw_trans.y * IMPORT_SCALE, joint.raw_trans.z * IMPORT_SCALE]
         pbone["native_bind_r"] = [joint.raw_rot.w, joint.raw_rot.x, joint.raw_rot.y, joint.raw_rot.z]
         pbone["native_bind_s"] = [joint.raw_scale.x, joint.raw_scale.y, joint.raw_scale.z]
 
