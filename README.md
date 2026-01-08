@@ -1,48 +1,128 @@
 # Aventurine: League Tools
 
-This is a Blender addon for importing and exporting League of Legends game assets. It is designed to work with Blender 4.0 and newer.
+> A comprehensive Blender addon for working with League of Legends game assets
 
-The goal is to provide a native way to handle meshes (.skn), skeletons (.skl), and animations (.anm) without needing external converters. We also included some extra tools like physics simulation and animation retargeting to make the workflow smoother.
+Aventurine provides a native solution for handling League of Legends meshes, skeletons, and animations directly within Blender 4.0 and newer, eliminating the need for external converters.
 
-<img width="1919" height="1034" alt="image" src="https://github.com/user-attachments/assets/ccb4b2fd-de63-4a3e-aa69-49d37d3dba53" />
+![Aventurine Preview](https://github.com/user-attachments/assets/ccb4b2fd-de63-4a3e-aa69-49d37d3dba53)
 
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Import and Export](#import-and-export)
+  - [Physics Simulation](#physics-simulation)
+  - [Animation Retargeting](#animation-retargeting)
+  - [Updating](#updating)
+- [Technical Details](#technical-details)
+- [Credits](#credits)
+- [License](#license)
+
+---
 
 ## Features
 
-- Import and Export SKN models (supports most versions).
-- Import and Export SKL skeletons.
-- Import and Export ANM animation files.
-- Built-in Physics system (based on Wiggle 2).
-- Animation Retargeting tool to port animations between characters.
-- In-app updater to get the latest version from GitHub.
+**Core Functionality**
+- **SKN Models**: Full import and export support for most SKN versions
+- **SKL Skeletons**: Complete skeleton import and export capabilities
+- **ANM Animations**: Native animation file handling
+
+**Advanced Tools**
+- **Physics System**: Built-in physics simulation based on Wiggle 2
+- **Animation Retargeting**: Port animations between different character rigs
+- **Auto-Updater**: Keep your addon current with the latest GitHub releases
+
+---
 
 ## Installation
 
-1. Download the latest release.
-2. Open Blender and go to Edit > Preferences > Add-ons.
-3. Click Install... and select the zip file.
-4. Search for "Aventurine" and enable the plugin.
+### Quick Start
 
-## How to Use
+1. Download the latest release from the [Releases](../../releases) page
+2. Open Blender and navigate to **Edit → Preferences → Add-ons**
+3. Click **Install...** and select the downloaded ZIP file
+4. Search for "Aventurine" in the addon list
+5. Enable the checkbox next to the addon
 
-Once installed, you can find the tools in the N-panel (press N in the 3D Viewport) under the "Aventurine LoL" tab.
+The addon is now ready to use.
 
-### Import / Export
-The main panel lets you import or export the three main file types. When exporting, check your settings to ensure you are exporting the correct armature or mesh.
+---
 
-### Physics and Retargeting
-These tools have their own tabs in the N-panel (LoL Physics and LoL Retarget) when enabled in the addon preferences. They help with automating secondary motion and transferring animations between different skeletons.
+## Usage
+
+Access all Aventurine tools through the **N-panel** in the 3D Viewport (press `N` to toggle) under the **"Aventurine LoL"** tab.
+
+### Import and Export
+
+The main panel provides controls for importing and exporting League of Legends asset files:
+
+- **SKN files**: Mesh data with vertex weights and materials
+- **SKL files**: Skeletal armature structures
+- **ANM files**: Animation data compatible with League rigs
+
+**Important**: When exporting, verify your settings to ensure the correct armature or mesh is selected for export.
+
+### Physics Simulation
+
+Enable Animation Tools in the addon preferences to access the **Animation Tools** tab in the N-panel. This feature automates secondary motion for elements like hair, cloth, and accessories, providing realistic movement without manual keyframing.
+
+### Animation Retargeting
+
+The **LoL Retarget** option (available when enabled in preferences) allows you to transfer animations between different skeletons. This is particularly useful for:
+
+- Adapting animations to custom rigs
+- Sharing animations across different champions
+- Testing animations on various character models
 
 ### Updating
-You can check for updates in the Addon Preferences menu. If a new version is found, you can install it directly from there.
+
+Check for updates directly within Blender:
+
+1. Navigate to **Edit → Preferences → Add-ons**
+2. Find Aventurine in the addon list
+3. Expand the addon details
+4. Click **Check for Updates** in the preferences panel
+5. If an update is available, install it with one click
+
+---
+
+## Technical Details
+
+**Compatibility**
+- Blender 4.0 or newer
+- Supports multiple SKN format versions
+- Cross-compatible with League of Legends game files
+
+**Architecture**
+- Native Python implementation
+- No external dependencies or converters required
+- Modular design for easy maintenance and updates
+
+---
 
 ## Credits
 
-Created by Bud and Frog.
-Based on the lol_maya plugin by tarngaina.
-Physics code is based on Wiggle 2 by shteeve3d.
+**Development Team**
+- **Bud** - Creator/Developer
+- **Frog** - Developer
+
+**Acknowledgments**
+- Based on the `lol_maya` plugin by [tarngaina](https://github.com/tarngaina)
+- Physics implementation derived from [Wiggle 2](https://github.com/shteeve3d/wiggle) by shteeve3d
+
+---
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 (GPLv3).
-This is required because the physics module incorporates code from Wiggle 2, which is an open-source project licensed under GPLv3.
+This project is licensed under the **GNU General Public License v3.0 (GPLv3)**.
+
+The GPLv3 license is required because the physics module incorporates code from Wiggle 2, which is distributed under the same license. This ensures compliance with open-source licensing requirements and allows the community to freely use, modify, and distribute the addon.
+
+For full license details, see the [LICENSE](LICENSE) file in this repository.
+
+---
+
+**Questions or Issues?** Open an issue on the [GitHub Issues](../../issues) page.
