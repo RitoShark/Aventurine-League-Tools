@@ -6,15 +6,19 @@ import math
 from ..utils.binary_utils import BinaryStream, Hash
 from . import import_skl
 
-def write_anm(filepath, armature_obj, fps=30.0):
+def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_transforms=False):
     """Write Blender animation to ANM file (Uncompressed v4 format)"""
-    
+
     if not armature_obj.animation_data or not armature_obj.animation_data.action:
         raise Exception("No animation data found on armature")
-    
+
     action = armature_obj.animation_data.action
-    P = mathutils.Matrix(((-1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
-    P_inv = P.inverted()
+    if disable_transforms:
+        P = mathutils.Matrix.Identity(4)
+        P_inv = mathutils.Matrix.Identity(4)
+    else:
+        P = mathutils.Matrix(((-1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
+        P_inv = P.inverted()
     
     bones = list(armature_obj.pose.bones)
     
@@ -131,7 +135,8 @@ def write_anm(filepath, armature_obj, fps=30.0):
                 # r = mathutils.Quaternion((r.w, r.x, -r.y, -r.z))
                 
                 # Add to palettes (scale translations back to game units)
-                t_id = add_to_vec_palette(t * import_skl.EXPORT_SCALE)
+                scale = 1.0 if disable_scaling else import_skl.EXPORT_SCALE
+                t_id = add_to_vec_palette(t * scale)
                 s_id = add_to_vec_palette(s)
                 r_id = add_to_quat_palette(r)
                 
@@ -207,21 +212,21 @@ def write_anm(filepath, armature_obj, fps=30.0):
     
     return True
 
-def save(operator, context, filepath, target_armature=None):
+def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False):
     armature_obj = target_armature
-    
+
     if not armature_obj:
         armature_obj = context.active_object
         if not armature_obj or armature_obj.type != 'ARMATURE':
             armature_obj = next((o for o in context.scene.objects if o.type == 'ARMATURE'), None)
-        
+
     if not armature_obj:
         operator.report({'ERROR'}, "No Armature found")
         return {'CANCELLED'}
-    
+
     try:
         fps = context.scene.render.fps
-        write_anm(filepath, armature_obj, fps)
+        write_anm(filepath, armature_obj, fps, disable_scaling, disable_transforms)
         operator.report({'INFO'}, f"Exported ANM: {filepath}")
         return {'FINISHED'}
     except Exception as e:

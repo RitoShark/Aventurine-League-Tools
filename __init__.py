@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (1, 3, 0),
+    "version": (1, 4, 0),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -320,13 +320,25 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
         description="Remove Blender's .001, .002 suffixes from bone and material names",
         default=True
     )
-    
+
+    disable_scaling: BoolProperty(
+        name="Disable Scaling",
+        description="Disable the 100x scale factor applied during export (exports raw Blender units)",
+        default=False
+    )
+
+    disable_transforms: BoolProperty(
+        name="Disable Transforms",
+        description="Disable coordinate system conversion (Y-up to Z-up transformation)",
+        default=False
+    )
+
     target_armature_name: StringProperty(options={'HIDDEN'})
 
     def invoke(self, context, event):
         # Try to get stored path from mesh or armature
         obj = context.active_object
-        
+
         # Capture target armature
         if obj:
             if obj.type == 'ARMATURE':
@@ -335,7 +347,7 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
                 arm = obj.find_armature() or (obj.parent if obj.parent and obj.parent.type == 'ARMATURE' else None)
                 if arm:
                     self.target_armature_name = arm.name
-        
+
         if obj:
             path = obj.get("lol_skn_filepath")
             if path:
@@ -345,33 +357,45 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
                 if path:
                     self.filepath = path
         return super().invoke(context, event)
-    
+
     def execute(self, context):
         from .io import export_skn
         target_armature = context.scene.objects.get(self.target_armature_name) if self.target_armature_name else None
-        return export_skn.save(self, context, self.filepath, self.export_skl, self.clean_names, target_armature=target_armature)
+        return export_skn.save(self, context, self.filepath, self.export_skl, self.clean_names, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms)
 
 # Export operator for SKL
 class ExportSKL(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.skl"
     bl_label = "Export SKL"
     bl_options = {'PRESET', 'UNDO'}
-    
+
     filename_ext = ".skl"
     filter_glob: StringProperty(default="*.skl", options={'HIDDEN'})
-    
+
     check_existing: BoolProperty(
         name="Confirm Overwrite",
         description="Prompt before overwriting existing files",
         default=True
     )
-    
+
+    disable_scaling: BoolProperty(
+        name="Disable Scaling",
+        description="Disable the 100x scale factor applied during export (exports raw Blender units)",
+        default=False
+    )
+
+    disable_transforms: BoolProperty(
+        name="Disable Transforms",
+        description="Disable coordinate system conversion (Y-up to Z-up transformation)",
+        default=False
+    )
+
     target_armature_name: StringProperty(options={'HIDDEN'})
 
     def invoke(self, context, event):
         # Try to get stored path from armature
         obj = context.active_object
-        
+
         # Capture target armature
         if obj:
             if obj.type == 'ARMATURE':
@@ -380,7 +404,7 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
                 arm = obj.find_armature() or (obj.parent if obj.parent and obj.parent.type == 'ARMATURE' else None)
                 if arm:
                     self.target_armature_name = arm.name
-        
+
         if obj:
             if obj.type == 'ARMATURE':
                 path = obj.get("lol_skl_filepath")
@@ -393,33 +417,45 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
                     if path:
                         self.filepath = path
         return super().invoke(context, event)
-    
+
     def execute(self, context):
         from .io import export_skl
         target_armature = context.scene.objects.get(self.target_armature_name) if self.target_armature_name else None
-        return export_skl.save(self, context, self.filepath, target_armature=target_armature)
+        return export_skl.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms)
 
 # Export operator for ANM
 class ExportANM(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.anm"
     bl_label = "Export ANM"
     bl_options = {'PRESET', 'UNDO'}
-    
+
     filename_ext = ".anm"
     filter_glob: StringProperty(default="*.anm", options={'HIDDEN'})
-    
+
     check_existing: BoolProperty(
         name="Confirm Overwrite",
         description="Prompt before overwriting existing files",
         default=True
     )
-    
+
+    disable_scaling: BoolProperty(
+        name="Disable Scaling",
+        description="Disable the 100x scale factor applied during export (exports raw Blender units)",
+        default=False
+    )
+
+    disable_transforms: BoolProperty(
+        name="Disable Transforms",
+        description="Disable coordinate system conversion (Y-up to Z-up transformation)",
+        default=False
+    )
+
     target_armature_name: StringProperty(options={'HIDDEN'})
 
     def invoke(self, context, event):
         # Try to get the filename from the action
         armature_obj = context.active_object
-        
+
         if not armature_obj or armature_obj.type != 'ARMATURE':
              # Try to find from selection if active is invalid
              # This duplicates the check below which is fine, but ensures we capture specific intention
@@ -427,10 +463,10 @@ class ExportANM(bpy.types.Operator, ExportHelper):
 
         if not armature_obj or armature_obj.type != 'ARMATURE':
             armature_obj = next((o for o in context.scene.objects if o.type == 'ARMATURE'), None)
-            
+
         if armature_obj:
             self.target_armature_name = armature_obj.name
-        
+
         if armature_obj and armature_obj.animation_data and armature_obj.animation_data.action:
             action = armature_obj.animation_data.action
             # Try stored filepath first, then use action name
@@ -440,13 +476,13 @@ class ExportANM(bpy.types.Operator, ExportHelper):
             else:
                 # Use action name as filename
                 self.filepath = action.name + ".anm"
-        
+
         return super().invoke(context, event)
-    
+
     def execute(self, context):
         from .io import export_anm
         target_armature = context.scene.objects.get(self.target_armature_name) if self.target_armature_name else None
-        return export_anm.save(self, context, self.filepath, target_armature=target_armature)
+        return export_anm.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms)
 
 
 # Menu function

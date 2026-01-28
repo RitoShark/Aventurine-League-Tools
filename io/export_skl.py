@@ -4,12 +4,16 @@ import os
 from ..utils.binary_utils import BinaryStream, Hash
 from . import import_skl
 
-def write_skl(filepath, armature_obj):
+def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=False):
     """Write Blender armature to SKL file (Version 0)"""
-    
+
     # Coordinate conversion matrix P (X-mirror + Y-up to Z-up)
-    P = mathutils.Matrix(((-1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
-    P_inv = P.inverted()
+    if disable_transforms:
+        P = mathutils.Matrix.Identity(4)
+        P_inv = mathutils.Matrix.Identity(4)
+    else:
+        P = mathutils.Matrix(((-1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
+        P_inv = P.inverted()
     
     # Get bones and preserve order
     bones = armature_obj.pose.bones
@@ -122,9 +126,9 @@ def write_skl(filepath, armature_obj):
             
             # Local Transform (TRS)
             l_t, l_r, l_s = l_mat_local.decompose()
-            
+
             # Scale translations back to game units (native_bind_t is at 0.01 scale)
-            scale = import_skl.EXPORT_SCALE
+            scale = 1.0 if disable_scaling else import_skl.EXPORT_SCALE
             bs.write_vec3(l_t * scale)
             bs.write_vec3(l_s)
             bs.write_quat(l_r)
@@ -160,21 +164,21 @@ def write_skl(filepath, armature_obj):
         
     return True
 
-def save(operator, context, filepath, target_armature=None):
+def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False):
     armature_obj = target_armature
-    
+
     if not armature_obj:
         armature_obj = context.active_object
         if not armature_obj or armature_obj.type != 'ARMATURE':
             # Try to find an armature in the scene
             armature_obj = next((obj for obj in context.scene.objects if obj.type == 'ARMATURE'), None)
-        
+
     if not armature_obj:
         operator.report({'ERROR'}, "No Armature found in scene")
         return {'CANCELLED'}
-    
+
     try:
-        write_skl(filepath, armature_obj)
+        write_skl(filepath, armature_obj, disable_scaling, disable_transforms)
         operator.report({'INFO'}, f"Exported SKL: {filepath}")
         return {'FINISHED'}
     except Exception as e:

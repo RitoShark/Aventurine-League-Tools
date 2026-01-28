@@ -10,15 +10,15 @@ def clean_blender_name(name):
     """Remove Blender's .001, .002 etc. suffixes from names"""
     return re.sub(r'\.\d{3}$', '', name)
 
-def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name):
+def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, disable_scaling=False, disable_transforms=False):
     """Collect geometry data from a single mesh object with 1:1 vertex mapping to match Blender stats"""
-    
+
     mesh = mesh_obj.data
     mesh.calc_loop_triangles()
-    
+
     # Matrix to go from Mesh World to Armature Local
     world_to_armature = armature_obj.matrix_world.inverted() @ mesh_obj.matrix_world
-    scale = import_skl.EXPORT_SCALE
+    scale = 1.0 if disable_scaling else import_skl.EXPORT_SCALE
     
     # Map vertex groups to SKL bone indices
     group_to_bone_idx = {}
@@ -45,12 +45,18 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name):
     for i, v in enumerate(mesh.vertices):
         # Position
         v_B = world_to_armature @ v.co
-        v_L = mathutils.Vector((-v_B.x * scale, v_B.z * scale, -v_B.y * scale))
-        
+        if disable_transforms:
+            v_L = mathutils.Vector((v_B.x * scale, v_B.y * scale, v_B.z * scale))
+        else:
+            v_L = mathutils.Vector((-v_B.x * scale, v_B.z * scale, -v_B.y * scale))
+
         # Normal (prefer loop normal for fidelity, fallback to vertex normal)
         n_B = vert_normals.get(i, v.normal)
         n_A = (world_to_armature.to_3x3() @ n_B).normalized()
-        n_L = mathutils.Vector((-n_A.x, n_A.z, -n_A.y))
+        if disable_transforms:
+            n_L = mathutils.Vector((n_A.x, n_A.y, n_A.z))
+        else:
+            n_L = mathutils.Vector((-n_A.x, n_A.z, -n_A.y))
         
         # UV
         uv = vert_uvs.get(i, (0.0, 0.0))
@@ -92,9 +98,9 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name):
     }
 
 
-def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True):
+def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disable_scaling=False, disable_transforms=False):
     """Write multiple Blender meshes to a single SKN file with multiple submeshes"""
-    
+
     if not armature_obj:
         raise Exception("No armature found")
     
@@ -130,8 +136,8 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True):
         
         if clean_names:
             submesh_name = clean_blender_name(submesh_name)
-        
-        data = collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name)
+
+        data = collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, disable_scaling, disable_transforms)
         
         if not data['indices']:
             continue
@@ -190,7 +196,7 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True):
     return len(submesh_data), total_vertex_count
 
 
-def save(operator, context, filepath, export_skl_file=True, clean_names=True, target_armature=None):
+def save(operator, context, filepath, export_skl_file=True, clean_names=True, target_armature=None, disable_scaling=False, disable_transforms=False):
     armature_obj = target_armature
     mesh_objects = []
     
@@ -231,13 +237,13 @@ def save(operator, context, filepath, export_skl_file=True, clean_names=True, ta
         return {'CANCELLED'}
     
     try:
-        submesh_count, vertex_count = write_skn_multi(filepath, mesh_objects, armature_obj, clean_names)
+        submesh_count, vertex_count = write_skn_multi(filepath, mesh_objects, armature_obj, clean_names, disable_scaling, disable_transforms)
         operator.report({'INFO'}, f"Exported SKN: {submesh_count} submeshes, {vertex_count} vertices")
-        
+
         if export_skl_file and armature_obj:
             skl_path = os.path.splitext(filepath)[0] + ".skl"
             from . import export_skl
-            export_skl.write_skl(skl_path, armature_obj)
+            export_skl.write_skl(skl_path, armature_obj, disable_scaling, disable_transforms)
             operator.report({'INFO'}, f"Exported matching SKL: {skl_path}")
             
         return {'FINISHED'}
