@@ -80,7 +80,6 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                         if _b is not _native_in_group:
                             _visual_skip.add(_b.name)
         if _visual_skip:
-            print(f"[write_anm visual] skipping custom intermediate bones: {_visual_skip}")
 
     # Frame range - skip frame 0 (bind pose) to match Maya's behavior
     # Import puts bind at frame 0, animation starts at frame 1
@@ -215,28 +214,19 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
     bpy.context.scene.frame_set(0)
     bpy.context.view_layer.update()
 
-    print("[write_anm] ═══ CI rest-scale diagnostic ═══")
 
     if not _ci_bones:
-        print("[write_anm]   No CI bones found – no scale correction needed.")
     else:
         for _ci_name, _ci_pb in sorted(_ci_bones.items()):
             _ci_pose_scale = _ci_pb.scale.copy()
             _, _, _ci_ml_scale = _ci_pb.bone.matrix_local.decompose()
             _, _, _ci_vis_scale = _ci_pb.matrix.decompose()
             _ci_curr_pos = _ci_pb.bone.matrix_local.to_translation()
-            print(f"[write_anm]   CI bone {_ci_name!r}:")
-            print(f"              pose_scale  =({_ci_pose_scale.x:.5f},{_ci_pose_scale.y:.5f},{_ci_pose_scale.z:.5f})")
-            print(f"              ml_scale    =({_ci_ml_scale.x:.5f},{_ci_ml_scale.y:.5f},{_ci_ml_scale.z:.5f})")
-            print(f"              visual_scale=({_ci_vis_scale.x:.5f},{_ci_vis_scale.y:.5f},{_ci_vis_scale.z:.5f})")
-            print(f"              curr_armature_pos=({_ci_curr_pos.x:.5f},{_ci_curr_pos.y:.5f},{_ci_curr_pos.z:.5f})")
             # local-to-parent: reveals translational and scale offset introduced by CI
             if _ci_pb.parent:
                 try:
                     _ci_ltp = _ci_pb.parent.bone.matrix_local.inverted() @ _ci_pb.bone.matrix_local
                     _ci_ltp_t, _ci_ltp_r, _ci_ltp_s = _ci_ltp.decompose()
-                    print(f"              local_to_parent.t=({_ci_ltp_t.x:.5f},{_ci_ltp_t.y:.5f},{_ci_ltp_t.z:.5f})")
-                    print(f"              local_to_parent.s=({_ci_ltp_s.x:.5f},{_ci_ltp_s.y:.5f},{_ci_ltp_s.z:.5f})")
                 except Exception:
                     pass
 
@@ -320,16 +310,11 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
             _zero_axes = [ax for ax, v in zip('xyz', (_orig_rel.x, _orig_rel.y, _orig_rel.z))
                           if abs(v) <= 1e-6]
             if _zero_axes:
-                print(f"              *** axes {_zero_axes} near-zero in orig_rel → K=1 on those axes ***")
 
             _code_path = "NB" if _pbone.name in _native_anim_parent else \
                          "NC" if (_pbone.parent and _pbone.parent.name in _native_anim_parent) else \
                          "GP"
 
-            print(f"[write_anm]   Descendant {_pbone.name!r} (path={_code_path}):")
-            print(f"              curr_rel=({_curr_rel.x:.5f},{_curr_rel.y:.5f},{_curr_rel.z:.5f})")
-            print(f"              orig_rel=({_orig_rel.x:.5f},{_orig_rel.y:.5f},{_orig_rel.z:.5f})")
-            print(f"              K       =({_Kx:.5f},{_Ky:.5f},{_Kz:.5f})")
 
             _k_diff = (_K - mathutils.Vector((1.0, 1.0, 1.0))).length
             if _code_path == "NC":
@@ -337,19 +322,14 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                 # already correct without any K correction.  Applying K here would
                 # OVER-correct because the NC block's rest_v_local is computed from
                 # the original stored positions, not the current CI-scaled ones.
-                print(f"              → NC block (stored matrices): no K correction needed")
             elif _k_diff > 2e-3:
                 # Threshold 2e-3: filters floating-point drift (< 0.2% on bones
                 # that didn't actually move) while catching all real CI scale
                 # corrections (typically 10–60% off from 1).
                 _ci_scale_correction[_pbone.name] = _K
-                print(f"              → CI scale correction REGISTERED (will divide t by K)")
             else:
-                print(f"              → K≈1 (or float noise), no correction registered")
 
     bpy.context.scene.frame_set(_frame_before_diag)
-    print(f"[write_anm]   Total bones with CI scale correction: {len(_ci_scale_correction)}")
-    print("[write_anm] ═══ End CI diagnostic ═══")
 
     current_frame_orig = bpy.context.scene.frame_current
 
@@ -413,15 +393,8 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                             _dbg_bt, _, _dbg_bs = pbone.matrix_basis.decompose()
                             _dbg_nml, _, _ = nb_stored_ml.decompose()
                             _dbg_anc_inv_t, _, _ = anc_rest_inv.decompose()
-                            print(f"[write_anm] NB block | bone={pbone.name!r} native_anc={_native_anc.name!r}")
-                            print(f"            nb_stored_ml.t  =({_dbg_nml.x:.5f},{_dbg_nml.y:.5f},{_dbg_nml.z:.5f})")
-                            print(f"            matrix_basis.t  =({_dbg_bt.x:.5f},{_dbg_bt.y:.5f},{_dbg_bt.z:.5f})")
-                            print(f"            matrix_basis.s  =({_dbg_bs.x:.5f},{_dbg_bs.y:.5f},{_dbg_bs.z:.5f})")
-                            print(f"            v_local_anim.t  =({_dbg_t.x:.5f},{_dbg_t.y:.5f},{_dbg_t.z:.5f})")
-                            print(f"            v_local_anim.s  =({_dbg_s.x:.5f},{_dbg_s.y:.5f},{_dbg_s.z:.5f})")
                     except (ValueError, AttributeError):
                         if f_idx == 0 and pbone.name in _ci_scale_correction:
-                            print(f"[write_anm] NB block FAILED for {pbone.name!r} – fell through to general path")
                         pass  # fall through with CI-parent values
 
                 # NC block: parent is NB (which is a custom_parent bone).
@@ -441,18 +414,8 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                             _dbg_nbt, _, _dbg_nbs = nb_stored_ml.decompose()
                             _dbg_nct, _, _dbg_ncs = nc_stored_ml.decompose()
                             _dbg_mbt, _, _dbg_mbs = pbone.matrix_basis.decompose()
-                            print(f"[write_anm] NC block | bone={pbone.name!r} parent={pbone.parent.name!r}")
-                            print(f"            nb_stored_ml.t =({_dbg_nbt.x:.5f},{_dbg_nbt.y:.5f},{_dbg_nbt.z:.5f})")
-                            print(f"            nb_stored_ml.s =({_dbg_nbs.x:.5f},{_dbg_nbs.y:.5f},{_dbg_nbs.z:.5f})")
-                            print(f"            nc_stored_ml.t =({_dbg_nct.x:.5f},{_dbg_nct.y:.5f},{_dbg_nct.z:.5f})")
-                            print(f"            nc_stored_ml.s =({_dbg_ncs.x:.5f},{_dbg_ncs.y:.5f},{_dbg_ncs.z:.5f})")
-                            print(f"            matrix_basis.t =({_dbg_mbt.x:.5f},{_dbg_mbt.y:.5f},{_dbg_mbt.z:.5f})")
-                            print(f"            matrix_basis.s =({_dbg_mbs.x:.5f},{_dbg_mbs.y:.5f},{_dbg_mbs.z:.5f})")
-                            print(f"            v_local_anim.t =({_dbg_t.x:.5f},{_dbg_t.y:.5f},{_dbg_t.z:.5f})")
-                            print(f"            v_local_anim.s =({_dbg_s.x:.5f},{_dbg_s.y:.5f},{_dbg_s.z:.5f})")
                     except (ValueError, AttributeError):
                         if f_idx == 0 and pbone.name in _ci_scale_correction:
-                            print(f"[write_anm] NC block FAILED for {pbone.name!r} – fell through to general path")
                         pass  # fall through with evaluated matrices
                 else:
                     # General path — log if this bone has a CI ancestor
@@ -460,17 +423,9 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                         _dbg_par = anim_parent.name if anim_parent else "None"
                         _dbg_par_t, _, _dbg_par_s = anim_parent.matrix.decompose() if anim_parent else (mathutils.Vector(), None, mathutils.Vector((1,1,1)))
                         _dbg_vla_t, _, _dbg_vla_s = v_local_anim.decompose()
-                        print(f"[write_anm] GP (general path) | bone={pbone.name!r} parent={_dbg_par!r}")
-                        print(f"            parent.matrix.t  =({_dbg_par_t.x:.5f},{_dbg_par_t.y:.5f},{_dbg_par_t.z:.5f})")
-                        print(f"            parent.matrix.s  =({_dbg_par_s.x:.5f},{_dbg_par_s.y:.5f},{_dbg_par_s.z:.5f})")
-                        print(f"            v_local_anim.t   =({_dbg_vla_t.x:.5f},{_dbg_vla_t.y:.5f},{_dbg_vla_t.z:.5f})")
-                        print(f"            v_local_anim.s   =({_dbg_vla_s.x:.5f},{_dbg_vla_s.y:.5f},{_dbg_vla_s.z:.5f})")
-                        print(f"            NOTE: GP used instead of NB/NC block")
-                        print(f"            _native_anc={_native_anc!r}  _parent_native_anc={_parent_native_anc!r}")
                         if pbone.parent:
                             _par_np = pbone.parent.get("native_parent","")
                             _par_bp = pbone.parent.parent.name if pbone.parent.parent else ""
-                            print(f"            parent.native_parent={_par_np!r}  parent.blender_parent={_par_bp!r}")
 
                 # ── CI scale correction (visual space) ─────────────────────
                 # K is computed in Blender (visual) space, so the correction
@@ -485,9 +440,6 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                 if _K_corr is not None and _native_anc is None and _parent_native_anc is None and not visual_mode:
                     _t_va, _r_va, _s_va = v_local_anim.decompose()
                     if f_idx == 0:
-                        print(f"[write_anm] CI-scale ÷K (vis-space) | bone={pbone.name!r}")
-                        print(f"            K     =({_K_corr.x:.5f},{_K_corr.y:.5f},{_K_corr.z:.5f})")
-                        print(f"            t_pre =({_t_va.x:.6f},{_t_va.y:.6f},{_t_va.z:.6f})")
                     _t_va_c = mathutils.Vector((
                         _t_va.x / _K_corr.x if abs(_K_corr.x) > 1e-8 else _t_va.x,
                         _t_va.y / _K_corr.y if abs(_K_corr.y) > 1e-8 else _t_va.y,
@@ -497,7 +449,6 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                                     _r_va.to_matrix().to_4x4() @
                                     mathutils.Matrix.Diagonal((*_s_va, 1.0)))
                     if f_idx == 0:
-                        print(f"            t_post=({_t_va_c.x:.6f},{_t_va_c.y:.6f},{_t_va_c.z:.6f})")
 
                 try:
                     C_child_inv = C_child.inverted()

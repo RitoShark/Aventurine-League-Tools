@@ -707,6 +707,29 @@ def apply_anm(anm, armature_obj, frame_offset=0, flip=False, adapt_to_edits=Fals
     print(f"Matched {matched_count} tracks to bones")
     print(f"Bones with keyframe data: {len(bone_keyframes)}")
 
+    # --- 3b. Fix quaternion sign continuity ---
+    # The "smallest three" quaternion compression always reconstructs the
+    # dropped component as positive (via sqrt), but different components may
+    # be dropped at adjacent frames.  This can flip the overall quaternion
+    # sign, causing Blender'''s interpolation to take the long path and
+    # produce wild rotation artifacts at in-between frames.
+    for bone_name, bdata in bone_keyframes.items():
+        rots = bdata.get('''rotation_quaternion''')
+        if not rots or len(rots) < 2:
+            continue
+        sorted_frames = sorted(rots.keys())
+        prev_q = rots[sorted_frames[0]]
+        for i in range(1, len(sorted_frames)):
+            f = sorted_frames[i]
+            cur_q = rots[f]
+            dot = (prev_q[0] * cur_q[0] + prev_q[1] * cur_q[1]
+                   + prev_q[2] * cur_q[2] + prev_q[3] * cur_q[3])
+            if dot < 0:
+                cur_q = (-cur_q[0], -cur_q[1], -cur_q[2], -cur_q[3])
+                rots[f] = cur_q
+            prev_q = cur_q
+
+
     # --- 4. Write keyframes - hybrid approach with Blender 5.0 compatibility ---
     # Use keyframe_insert once to create FCurves, then direct access for speed
     # Blender 5.0 moved fcurves to a new location in the layered action system

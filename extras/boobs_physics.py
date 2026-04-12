@@ -255,6 +255,10 @@ def bake_wiggle_for_current_action(context, armature_obj, bone_names, intensity)
     scene.wiggle.bake_overwrite = True
 
     scene.wiggle.loop = True
+
+    # Ensure lastframe starts at 0 so the first bake frame gets a correct
+    # frames_elapsed (1 instead of a wild delta from a previous animation).
+    scene.frame_set(0)
     bpy.ops.wiggle.reset()
 
     if is_loop:
@@ -850,6 +854,15 @@ class BOOBS_OT_ApplyToAll(Operator):
                 # Hard-reset physics between animations so velocity/position
                 # from the previous clip doesn't bleed into the next preroll.
                 armature_obj.wiggle_freeze = False
+
+                # Jump to frame 0 first so the Wiggle handler resets
+                # lastframe to 0.  Without this, lastframe stays at the
+                # previous animation's frame_end, and the frames_elapsed
+                # calculation on the first frame of the new bake can go
+                # negative (or very large), producing a broken dt that
+                # reverses forces or massively overshoots.
+                context.scene.frame_set(0)
+
                 try:
                     bpy.ops.wiggle.reset()
                 except Exception:
@@ -863,6 +876,10 @@ class BOOBS_OT_ApplyToAll(Operator):
                 armature_obj.animation_data.action = new_action
                 import_anm.apply_anm(anm, armature_obj, frame_offset=0)
                 new_action["lol_anm_filepath"] = anim_item.filepath
+
+                # Strip any imported breast-bone keyframes so the physics
+                # simulation starts from rest pose — same as preview does.
+                strip_physics_keyframes(new_action, bone_names)
 
                 # Re-apply wiggle each iteration: bake_wiggle_for_current_action may
                 # change effective_intensity for non-loop clips, so the next iteration
