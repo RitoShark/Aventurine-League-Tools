@@ -120,22 +120,28 @@ def read_skl(filepath):
 
 def create_armature(joints, name="Armature"):
     # Pass 1: Global positions via matrices (including scale in the chain)
+    # Recursive/memoized so that joints whose parent has a higher index (e.g.
+    # visual SKLs where custom bones are appended after native bones but are
+    # actually parents of some of those native bones) are handled correctly.
     global_pos = [mathutils.Vector((0,0,0))] * len(joints)
-    mats = [mathutils.Matrix.Identity(4)] * len(joints)
+    mats = [None] * len(joints)
 
-    for i, joint in enumerate(joints):
+    def compute_mat(i):
+        if mats[i] is not None:
+            return mats[i]
+        joint = joints[i]
         mat_t = mathutils.Matrix.Translation(joint.local_translation)
         mat_r = joint.local_rotation.to_matrix().to_4x4()
         mat_s = mathutils.Matrix.Diagonal((*joint.local_scale, 1.0))
-        # Full local transform: Translation @ Rotation @ Scale (same order as Maya)
         local_mat = mat_t @ mat_r @ mat_s
-
         if joint.parent >= 0:
-            mats[i] = mats[joint.parent] @ local_mat
+            mats[i] = compute_mat(joint.parent) @ local_mat
         else:
             mats[i] = local_mat
+        return mats[i]
 
-        joint.global_pos = mats[i].to_translation()
+    for i, joint in enumerate(joints):
+        joint.global_pos = compute_mat(i).to_translation()
     
     armature_data = bpy.data.armatures.new(name)
     armature_obj = bpy.data.objects.new(name, armature_data)
@@ -217,6 +223,34 @@ def create_armature(joints, name="Armature"):
         pbone["native_bind_s"] = [joint.raw_scale.x, joint.raw_scale.y, joint.raw_scale.z]
         # Store original bone index for stable export ordering
         pbone["native_bone_index"] = i
+        # Store original parent name so animation correction can find the right
+        # C_parent even if the user reparents bones in Blender
+        if joint.parent >= 0:
+            pbone["native_parent"] = joints[joint.parent].name
+        else:
+            pbone["native_parent"] = ""
+        # Store native global rest matrix (Blender-space, flat 4x4) so animation
+        # correction matrices stay correct even when the user modifies the parent chain
+        # (e.g. inserting a bone before the shoulder).  The hierarchy walk in
+        # import_anm / export_anm would use the *current* parents with the *original*
+        # local transforms, producing wrong globals.  Stored globals avoid that.
+        mat = mats[i]
+        pbone["native_global_rest_mat"] = [
+            mat[0][0], mat[0][1], mat[0][2], mat[0][3],
+            mat[1][0], mat[1][1], mat[1][2], mat[1][3],
+            mat[2][0], mat[2][1], mat[2][2], mat[2][3],
+            mat[3][0], mat[3][1], mat[3][2], mat[3][3],
+        ]
+        # Store the bone's matrix_local at import time. Used by "Adapt to armature
+        # edits" mode (Option B) — keeps V_global stable so corrections don't drift
+        # when bones are edited, while rest_v_local follows the current positions.
+        ml = armature_obj.data.bones[joint.name].matrix_local
+        pbone["native_matrix_local"] = [
+            ml[0][0], ml[0][1], ml[0][2], ml[0][3],
+            ml[1][0], ml[1][1], ml[1][2], ml[1][3],
+            ml[2][0], ml[2][1], ml[2][2], ml[2][3],
+            ml[3][0], ml[3][1], ml[3][2], ml[3][3],
+        ]
 
     return armature_obj
 

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (2, 7, 1),
+    "version": (2, 7, 2),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -10,7 +10,7 @@ bl_info = {
 
 import bpy
 import os
-from bpy.props import StringProperty, BoolProperty, IntProperty, CollectionProperty
+from bpy.props import StringProperty, BoolProperty, IntProperty, CollectionProperty, EnumProperty
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from .ui import panels
@@ -613,7 +613,31 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
         default=False
     )
 
+    unmodified_league_armature: BoolProperty(
+        name="Unmodified League Armature",
+        description=(
+            "Keep enabled for standard exports. "
+            "Disable when exporting a visually-edited armature: the exporter will "
+            "locate an 'animations' folder next to the SKN, back up all .anm files "
+            "to 'Unmodified_anm_backup', then re-export each one so the animation "
+            "transforms match the visual skeleton."
+        ),
+        default=True
+    )
+
     target_armature_name: StringProperty(options={'HIDDEN'})
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = False
+        layout.prop(self, "export_skl")
+        layout.prop(self, "clean_names")
+        layout.prop(self, "disable_scaling")
+        layout.prop(self, "disable_transforms")
+        layout.prop(self, "use_visual_pose")
+        layout.separator()
+        layout.prop(self, "unmodified_league_armature")
 
     def invoke(self, context, event):
         # Try to get stored path from mesh or armature
@@ -640,8 +664,115 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
 
     def execute(self, context):
         from .io import export_skn
+
         target_armature = context.scene.objects.get(self.target_armature_name) if self.target_armature_name else None
-        return export_skn.save(self, context, self.filepath, self.export_skl, self.clean_names, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms, use_visual_pose=self.use_visual_pose)
+        effective_visual_pose = self.use_visual_pose or (not self.unmodified_league_armature)
+
+        # Resolve armature once — used for parenting fix, export, and anim processing.
+        arm = target_armature
+        if not arm:
+            arm = context.active_object if context.active_object and context.active_object.type == 'ARMATURE' else None
+        if not arm:
+            arm = next((o for o in context.scene.objects if o.type == 'ARMATURE'), None)
+
+        # Auto-fix custom bone parenting BEFORE export so the SKL is written with
+        # the correct hierarchy.  This is a no-op when there are no custom bones.
+        if arm:
+            try:
+                fixes = export_skn.fix_custom_bone_parenting(arm)
+                if fixes:
+                    names = ", ".join(b for b, _ in fixes)
+                    self.report({'INFO'}, f"Auto-fixed parenting for: {names}")
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.report({'WARNING'}, f"Auto-fix parenting failed: {e}")
+
+        result = export_skn.save(
+            self, context, self.filepath, self.export_skl, self.clean_names,
+            target_armature=target_armature,
+            disable_scaling=self.disable_scaling,
+            disable_transforms=self.disable_transforms,
+            use_visual_pose=effective_visual_pose,
+        )
+
+        # Update the stored SKN path so the next export dialog opens at the
+        # correct directory for subsequent exports.
+        if result == {'FINISHED'} and arm:
+            arm["lol_skn_filepath"] = self.filepath
+
+        if result == {'FINISHED'} and not self.unmodified_league_armature:
+            if arm:
+                try:
+                    import shutil
+                    from .io import export_anm, import_anm
+                    skn_dir = os.path.dirname(os.path.abspath(self.filepath))
+                    anim_dir = os.path.join(skn_dir, "animations")
+                    backup_dir = os.path.join(skn_dir, "Unmodified_anm_backup")
+
+                    if not os.path.isdir(anim_dir):
+                        self.report({'WARNING'}, f"No 'animations' folder found next to SKN at: {skn_dir}")
+                    else:
+                        # First run: back up originals from animations → backup.
+                        # Subsequent runs: backup already exists, so read from backup (originals untouched).
+                        if not os.path.isdir(backup_dir):
+                            os.makedirs(backup_dir, exist_ok=True)
+                            for fname in os.listdir(anim_dir):
+                                if fname.lower().endswith('.anm'):
+                                    shutil.copy2(os.path.join(anim_dir, fname),
+                                                 os.path.join(backup_dir, fname))
+                            source_dir = anim_dir
+                        else:
+                            source_dir = backup_dir
+
+                        anm_files = sorted(f for f in os.listdir(source_dir) if f.lower().endswith('.anm'))
+                        if not anm_files:
+                            self.report({'WARNING'}, f"No ANM files found in '{source_dir}'")
+                        else:
+                            if not arm.animation_data:
+                                arm.animation_data_create()
+                            original_action = arm.animation_data.action
+                            exported_count = 0
+                            failed = []
+                            try:
+                                for fname in anm_files:
+                                    src_path = os.path.join(source_dir, fname)
+                                    dst_path = os.path.join(anim_dir, fname)
+                                    temp_action = None
+                                    try:
+                                        anm_data = import_anm.read_anm(src_path)
+                                        action_name = os.path.splitext(fname)[0]
+                                        temp_action = bpy.data.actions.new(name=f"__tmp_{action_name}")
+                                        arm.animation_data.action = temp_action
+                                        import_anm.apply_anm(anm_data, arm)
+                                        export_anm.write_anm(
+                                            dst_path, arm, anm_data.fps,
+                                            disable_scaling=self.disable_scaling,
+                                            disable_transforms=self.disable_transforms,
+                                            visual_mode=True,
+                                        )
+                                        exported_count += 1
+                                    except Exception as e:
+                                        import traceback
+                                        traceback.print_exc()
+                                        failed.append(f"{fname} ({e})")
+                                    finally:
+                                        if temp_action is not None:
+                                            bpy.data.actions.remove(temp_action)
+                            finally:
+                                arm.animation_data.action = original_action
+                            if failed:
+                                self.report({'WARNING'}, f"Processed {exported_count} animation(s). Failed: {'; '.join(failed)}")
+                            else:
+                                self.report({'INFO'}, f"Processed {exported_count} animation(s) with visual mode")
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self.report({'WARNING'}, f"Animation export failed: {e}")
+            else:
+                self.report({'WARNING'}, "No Armature found — skipping animation export")
+
+        return result
 
 # Export operator for SKL
 class ExportSKL(bpy.types.Operator, ExportHelper):

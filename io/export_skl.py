@@ -28,6 +28,24 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
     native_bones.sort(key=lambda x: x[0])
     bone_list = [b for _, b in native_bones] + new_bones
     bone_name_to_index = {b.name: i for i, b in enumerate(bone_list)}
+
+    # Names to write into the SKL file (and use for hash computation).
+    # Normally we strip Blender's .001/.002 suffixes.  However, if the base name
+    # already exists as a *different* bone in this export (e.g. the user duplicated
+    # "L_Clavicle" to create "L_Clavicle.001" as an intermediate bone), keeping
+    # the suffix is essential: without it both bones would be written as "L_Clavicle",
+    # and on reimport the second bone would be silently renamed by Blender while
+    # Pass 3 still looks it up by the original name — leaving it without a parent.
+    all_bone_names_in_export = {b.name for b in bone_list}
+
+    def get_export_name(bone_name):
+        if '.' not in bone_name:
+            return bone_name
+        clean = bone_name.split('.')[0]
+        # If the clean base name exists as another bone, keep the full suffix
+        if clean in all_bone_names_in_export:
+            return bone_name
+        return clean
     
     joint_count = len(bone_list)
 
@@ -65,6 +83,29 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
             lm_r = mathutils.Quaternion(nb_r).to_matrix().to_4x4()
             lm_s = mathutils.Matrix.Diagonal((nb_s[0], nb_s[1], nb_s[2], 1.0))
             l_mat_local = lm_t @ lm_r @ lm_s
+
+            # When custom bones were inserted between this native bone and its original
+            # parent (e.g. R_Clavicle.001 between Chest and R_Clavicle), the stored
+            # native_bind is relative to the native parent — not to the new Blender parent.
+            # Without adjustment the computed global picks up an extra custom-bone
+            # transform, breaking the inverse-bind matrix and skinning for the entire
+            # subtree.  Adjust l_mat_local so the global stays identical to the original.
+            native_parent_name = pbone.get("native_parent", "")
+            if pbone.parent and native_parent_name and pbone.parent.name != native_parent_name:
+                np_idx = bone_name_to_index.get(native_parent_name)
+                bp_idx = bone_name_to_index.get(pbone.parent.name)
+                if np_idx is not None and bp_idx is not None:
+                    np_global, _ = calc_league_matrix(np_idx)
+                    bp_global, _ = calc_league_matrix(bp_idx)
+                    try:
+                        # custom_chain = accumulated League transform from native parent
+                        # to the Blender parent (the custom-bone chain).
+                        # new_local = custom_chain⁻¹ @ original_local ensures:
+                        #   blender_parent.global @ new_local = native_parent.global @ original_local
+                        custom_chain = np_global.inverted() @ bp_global
+                        l_mat_local = custom_chain.inverted() @ l_mat_local
+                    except ValueError:
+                        pass  # singular — keep original local unchanged
         elif use_visual_pose and pbone.name in frame0_matrices:
             # Experimental: Use the posed transform at frame 0
             b_global = frame0_matrices[pbone.name]
@@ -138,7 +179,7 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
         bs.seek(joint_names_offset)
         for i, pbone in enumerate(bone_list):
             name_offsets[i] = bs.tell()
-            name = pbone.name.split('.')[0] if '.' in pbone.name else pbone.name
+            name = get_export_name(pbone.name)
             bs.write_ascii(name)
             bs.write_uint8(0)
             
@@ -154,8 +195,7 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
             bs.write_int16(parent_idx)
             
             bs.write_uint16(0) # flags
-            clean_name = pbone.name.split('.')[0] if '.' in pbone.name else pbone.name
-            bs.write_uint32(Hash.elf(clean_name))
+            bs.write_uint32(Hash.elf(get_export_name(pbone.name)))
             bs.write_float(2.1) # radius
             
             # Retrieve calculated matrices
@@ -192,8 +232,7 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
         for i, pbone in enumerate(bone_list):
             bs.write_uint16(i)
             bs.write_uint16(0)
-            clean_name = pbone.name.split('.')[0] if '.' in pbone.name else pbone.name
-            bs.write_uint32(Hash.elf(clean_name))
+            bs.write_uint32(Hash.elf(get_export_name(pbone.name)))
             
         bs.seek(influences_offset)
         for i in range(joint_count):
