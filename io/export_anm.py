@@ -79,7 +79,6 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                     for _b in _group:
                         if _b is not _native_in_group:
                             _visual_skip.add(_b.name)
-        if _visual_skip:
 
     # Frame range - skip frame 0 (bind pose) to match Maya's behavior
     # Import puts bind at frame 0, animation starts at frame 1
@@ -215,119 +214,109 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
     bpy.context.view_layer.update()
 
 
-    if not _ci_bones:
-    else:
-        for _ci_name, _ci_pb in sorted(_ci_bones.items()):
-            _ci_pose_scale = _ci_pb.scale.copy()
-            _, _, _ci_ml_scale = _ci_pb.bone.matrix_local.decompose()
-            _, _, _ci_vis_scale = _ci_pb.matrix.decompose()
-            _ci_curr_pos = _ci_pb.bone.matrix_local.to_translation()
-            # local-to-parent: reveals translational and scale offset introduced by CI
-            if _ci_pb.parent:
-                try:
-                    _ci_ltp = _ci_pb.parent.bone.matrix_local.inverted() @ _ci_pb.bone.matrix_local
-                    _ci_ltp_t, _ci_ltp_r, _ci_ltp_s = _ci_ltp.decompose()
-                except Exception:
-                    pass
+    for _ci_name, _ci_pb in sorted(_ci_bones.items()):
+        _ci_pose_scale = _ci_pb.scale.copy()
+        _, _, _ci_ml_scale = _ci_pb.bone.matrix_local.decompose()
+        _, _, _ci_vis_scale = _ci_pb.matrix.decompose()
+        _ci_curr_pos = _ci_pb.bone.matrix_local.to_translation()
+        # local-to-parent: reveals translational and scale offset introduced by CI
+        if _ci_pb.parent:
+            try:
+                _ci_ltp = _ci_pb.parent.bone.matrix_local.inverted() @ _ci_pb.bone.matrix_local
+                _ci_ltp_t, _ci_ltp_r, _ci_ltp_s = _ci_ltp.decompose()
+            except Exception:
+                pass
 
-        # Step 3 – for every native bone exported, check if it has a CI ancestor
-        #          and compute its scale ratio K from POSITION COMPARISON.
+    # Step 3 – for every native bone exported, check if it has a CI ancestor
+    #          and compute its scale ratio K from POSITION COMPARISON.
+    #
+    # Why position comparison?  When a CI bone is scaled in edit mode, Blender
+    # encodes the scale as a positional shift — bone.matrix_local.decompose()[2]
+    # always returns (1,1,1) for edit-mode scale.  The only reliable signal is
+    # the difference between the bone's CURRENT armature-space position and the
+    # ORIGINAL position stored in native_matrix_local at SKL import time.
+    #
+    # K[i] = curr_pos[i] / orig_pos[i]  (per-axis, safe division)
+    #
+    # This K is then used to divide the exported translation so that the
+    # ANM plays back correctly on a skeleton without the CI bone.
+    for _pbone in bones:
+        if visual_mode and _pbone.name in _visual_skip:
+            continue
+
+        # Walk up the Blender parent chain to find any CI.
+        _has_ci = False
+        _cur = _pbone.parent
+        while _cur is not None:
+            if _cur.name in _ci_bones:
+                _has_ci = True
+                break
+            _cur = _cur.parent
+
+        if not _has_ci:
+            continue
+
+        # K = ratio of RELATIVE position (parent-space) now vs at SKL import.
         #
-        # Why position comparison?  When a CI bone is scaled in edit mode, Blender
-        # encodes the scale as a positional shift — bone.matrix_local.decompose()[2]
-        # always returns (1,1,1) for edit-mode scale.  The only reliable signal is
-        # the difference between the bone's CURRENT armature-space position and the
-        # ORIGINAL position stored in native_matrix_local at SKL import time.
-        #
-        # K[i] = curr_pos[i] / orig_pos[i]  (per-axis, safe division)
-        #
-        # This K is then used to divide the exported translation so that the
-        # ANM plays back correctly on a skeleton without the CI bone.
-        for _pbone in bones:
-            if visual_mode and _pbone.name in _visual_skip:
-                continue
-
-            # Walk up the Blender parent chain to find any CI.
-            _has_ci = False
-            _cur = _pbone.parent
-            while _cur is not None:
-                if _cur.name in _ci_bones:
-                    _has_ci = True
-                    break
-                _cur = _cur.parent
-
-            if not _has_ci:
-                continue
-
-            # K = ratio of RELATIVE position (parent-space) now vs at SKL import.
-            #
-            # Why relative, not absolute?
-            # If a scaled CI_A is above an unscaled CI_B, every bone below CI_A
-            # (including CI_B's descendants) has a different absolute position.
-            # But for CI_B's descendants, BOTH the native parent and the bone itself
-            # shifted by the same CI_A delta, so (parent^{-1} @ bone) is UNCHANGED
-            # → K = 1 → no spurious correction.  Only when CI sits directly between
-            # this bone and its Blender parent does the relative position differ
-            # → K ≠ 1 → correction is applied.
-            _par = _pbone.parent
-            if _par is not None:
-                try:
-                    _curr_rel_mat = _par.bone.matrix_local.inverted() @ _pbone.bone.matrix_local
-                except Exception:
-                    _curr_rel_mat = _pbone.bone.matrix_local.copy()
-
-                _par_stored  = _par.get("native_matrix_local")
-                _bone_stored = _pbone.get("native_matrix_local")
-                if (_par_stored  and len(_par_stored)  == 16 and
-                        _bone_stored and len(_bone_stored) == 16):
-                    _par_orig  = mathutils.Matrix([_par_stored[0:4],  _par_stored[4:8],
-                                                   _par_stored[8:12], _par_stored[12:16]])
-                    _bone_orig = mathutils.Matrix([_bone_stored[0:4],  _bone_stored[4:8],
-                                                   _bone_stored[8:12], _bone_stored[12:16]])
-                    try:
-                        _orig_rel_mat = _par_orig.inverted() @ _bone_orig
-                    except Exception:
-                        _orig_rel_mat = _bone_orig.copy()
-                else:
-                    _orig_rel_mat = _curr_rel_mat  # no stored data → assume unchanged
-            else:
-                # Root bone — fall back to absolute comparison.
+        # Why relative, not absolute?
+        # If a scaled CI_A is above an unscaled CI_B, every bone below CI_A
+        # (including CI_B's descendants) has a different absolute position.
+        # But for CI_B's descendants, BOTH the native parent and the bone itself
+        # shifted by the same CI_A delta, so (parent^{-1} @ bone) is UNCHANGED
+        # → K = 1 → no spurious correction.  Only when CI sits directly between
+        # this bone and its Blender parent does the relative position differ
+        # → K ≠ 1 → correction is applied.
+        _par = _pbone.parent
+        if _par is not None:
+            try:
+                _curr_rel_mat = _par.bone.matrix_local.inverted() @ _pbone.bone.matrix_local
+            except Exception:
                 _curr_rel_mat = _pbone.bone.matrix_local.copy()
-                _bone_stored  = _pbone.get("native_matrix_local")
-                if _bone_stored and len(_bone_stored) == 16:
-                    _orig_rel_mat = mathutils.Matrix([_bone_stored[0:4],  _bone_stored[4:8],
-                                                      _bone_stored[8:12], _bone_stored[12:16]])
-                else:
-                    _orig_rel_mat = _curr_rel_mat
 
-            _curr_rel = _curr_rel_mat.to_translation()
-            _orig_rel = _orig_rel_mat.to_translation()
-
-            _Kx = (_curr_rel.x / _orig_rel.x) if abs(_orig_rel.x) > 1e-6 else 1.0
-            _Ky = (_curr_rel.y / _orig_rel.y) if abs(_orig_rel.y) > 1e-6 else 1.0
-            _Kz = (_curr_rel.z / _orig_rel.z) if abs(_orig_rel.z) > 1e-6 else 1.0
-            _K  = mathutils.Vector((_Kx, _Ky, _Kz))
-            _zero_axes = [ax for ax, v in zip('xyz', (_orig_rel.x, _orig_rel.y, _orig_rel.z))
-                          if abs(v) <= 1e-6]
-            if _zero_axes:
-
-            _code_path = "NB" if _pbone.name in _native_anim_parent else \
-                         "NC" if (_pbone.parent and _pbone.parent.name in _native_anim_parent) else \
-                         "GP"
-
-
-            _k_diff = (_K - mathutils.Vector((1.0, 1.0, 1.0))).length
-            if _code_path == "NC":
-                # NC bones use stored matrices in the NC block → translation is
-                # already correct without any K correction.  Applying K here would
-                # OVER-correct because the NC block's rest_v_local is computed from
-                # the original stored positions, not the current CI-scaled ones.
-            elif _k_diff > 2e-3:
-                # Threshold 2e-3: filters floating-point drift (< 0.2% on bones
-                # that didn't actually move) while catching all real CI scale
-                # corrections (typically 10–60% off from 1).
-                _ci_scale_correction[_pbone.name] = _K
+            _par_stored  = _par.get("native_matrix_local")
+            _bone_stored = _pbone.get("native_matrix_local")
+            if (_par_stored  and len(_par_stored)  == 16 and
+                    _bone_stored and len(_bone_stored) == 16):
+                _par_orig  = mathutils.Matrix([_par_stored[0:4],  _par_stored[4:8],
+                                               _par_stored[8:12], _par_stored[12:16]])
+                _bone_orig = mathutils.Matrix([_bone_stored[0:4],  _bone_stored[4:8],
+                                               _bone_stored[8:12], _bone_stored[12:16]])
+                try:
+                    _orig_rel_mat = _par_orig.inverted() @ _bone_orig
+                except Exception:
+                    _orig_rel_mat = _bone_orig.copy()
             else:
+                _orig_rel_mat = _curr_rel_mat  # no stored data → assume unchanged
+        else:
+            # Root bone — fall back to absolute comparison.
+            _curr_rel_mat = _pbone.bone.matrix_local.copy()
+            _bone_stored  = _pbone.get("native_matrix_local")
+            if _bone_stored and len(_bone_stored) == 16:
+                _orig_rel_mat = mathutils.Matrix([_bone_stored[0:4],  _bone_stored[4:8],
+                                                  _bone_stored[8:12], _bone_stored[12:16]])
+            else:
+                _orig_rel_mat = _curr_rel_mat
+
+        _curr_rel = _curr_rel_mat.to_translation()
+        _orig_rel = _orig_rel_mat.to_translation()
+
+        _Kx = (_curr_rel.x / _orig_rel.x) if abs(_orig_rel.x) > 1e-6 else 1.0
+        _Ky = (_curr_rel.y / _orig_rel.y) if abs(_orig_rel.y) > 1e-6 else 1.0
+        _Kz = (_curr_rel.z / _orig_rel.z) if abs(_orig_rel.z) > 1e-6 else 1.0
+        _K  = mathutils.Vector((_Kx, _Ky, _Kz))
+        _zero_axes = [ax for ax, v in zip('xyz', (_orig_rel.x, _orig_rel.y, _orig_rel.z))
+                      if abs(v) <= 1e-6]
+
+        _code_path = "NB" if _pbone.name in _native_anim_parent else \
+                     "NC" if (_pbone.parent and _pbone.parent.name in _native_anim_parent) else \
+                     "GP"
+
+
+        _k_diff = (_K - mathutils.Vector((1.0, 1.0, 1.0))).length
+        # NC bones use stored matrices, no K correction needed.
+        # Threshold 2e-3: filters float drift, catches real CI scale corrections.
+        if _code_path != "NC" and _k_diff > 2e-3:
+            _ci_scale_correction[_pbone.name] = _K
 
     bpy.context.scene.frame_set(_frame_before_diag)
 
@@ -388,13 +377,7 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                         nb_stored_ml = _get_v_global(pbone)
                         v_local_anim = anc_rest_inv @ nb_stored_ml @ pbone.matrix_basis
                         C_parent = corrections.get(_native_anc.name, mathutils.Matrix.Identity(4))
-                        if f_idx == 0 and pbone.name in _ci_scale_correction:
-                            _dbg_t, _, _dbg_s = v_local_anim.decompose()
-                            _dbg_bt, _, _dbg_bs = pbone.matrix_basis.decompose()
-                            _dbg_nml, _, _ = nb_stored_ml.decompose()
-                            _dbg_anc_inv_t, _, _ = anc_rest_inv.decompose()
                     except (ValueError, AttributeError):
-                        if f_idx == 0 and pbone.name in _ci_scale_correction:
                         pass  # fall through with CI-parent values
 
                 # NC block: parent is NB (which is a custom_parent bone).
@@ -409,23 +392,11 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                         nb_stored_ml = _get_v_global(pbone.parent)
                         nc_stored_ml = _get_v_global(pbone)
                         v_local_anim = nb_stored_ml.inverted() @ nc_stored_ml @ pbone.matrix_basis
-                        if f_idx == 0 and pbone.name in _ci_scale_correction:
-                            _dbg_t, _, _dbg_s = v_local_anim.decompose()
-                            _dbg_nbt, _, _dbg_nbs = nb_stored_ml.decompose()
-                            _dbg_nct, _, _dbg_ncs = nc_stored_ml.decompose()
-                            _dbg_mbt, _, _dbg_mbs = pbone.matrix_basis.decompose()
                     except (ValueError, AttributeError):
-                        if f_idx == 0 and pbone.name in _ci_scale_correction:
                         pass  # fall through with evaluated matrices
                 else:
                     # General path — log if this bone has a CI ancestor
-                    if f_idx == 0 and pbone.name in _ci_scale_correction:
-                        _dbg_par = anim_parent.name if anim_parent else "None"
-                        _dbg_par_t, _, _dbg_par_s = anim_parent.matrix.decompose() if anim_parent else (mathutils.Vector(), None, mathutils.Vector((1,1,1)))
-                        _dbg_vla_t, _, _dbg_vla_s = v_local_anim.decompose()
-                        if pbone.parent:
-                            _par_np = pbone.parent.get("native_parent","")
-                            _par_bp = pbone.parent.parent.name if pbone.parent.parent else ""
+                    pass
 
                 # ── CI scale correction (visual space) ─────────────────────
                 # K is computed in Blender (visual) space, so the correction
@@ -439,7 +410,6 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                 _K_corr = _ci_scale_correction.get(pbone.name)
                 if _K_corr is not None and _native_anc is None and _parent_native_anc is None and not visual_mode:
                     _t_va, _r_va, _s_va = v_local_anim.decompose()
-                    if f_idx == 0:
                     _t_va_c = mathutils.Vector((
                         _t_va.x / _K_corr.x if abs(_K_corr.x) > 1e-8 else _t_va.x,
                         _t_va.y / _K_corr.y if abs(_K_corr.y) > 1e-8 else _t_va.y,
@@ -448,7 +418,6 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                     v_local_anim = (mathutils.Matrix.Translation(_t_va_c) @
                                     _r_va.to_matrix().to_4x4() @
                                     mathutils.Matrix.Diagonal((*_s_va, 1.0)))
-                    if f_idx == 0:
 
                 try:
                     C_child_inv = C_child.inverted()
