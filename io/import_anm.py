@@ -711,10 +711,10 @@ def apply_anm(anm, armature_obj, frame_offset=0, flip=False, adapt_to_edits=Fals
     # The "smallest three" quaternion compression always reconstructs the
     # dropped component as positive (via sqrt), but different components may
     # be dropped at adjacent frames.  This can flip the overall quaternion
-    # sign, causing Blender'''s interpolation to take the long path and
+    # sign, causing Blender's interpolation to take the long path and
     # produce wild rotation artifacts at in-between frames.
     for bone_name, bdata in bone_keyframes.items():
-        rots = bdata.get('''rotation_quaternion''')
+        rots = bdata.get('rotation_quaternion')
         if not rots or len(rots) < 2:
             continue
         sorted_frames = sorted(rots.keys())
