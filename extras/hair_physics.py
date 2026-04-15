@@ -10,11 +10,12 @@ simulation itself prevents hair from clipping through the body.
 
 import bpy
 import os
+import math
 import bmesh
 from bpy.types import Panel, Operator, PropertyGroup, UIList
 from bpy.props import (
     StringProperty, CollectionProperty, IntProperty,
-    PointerProperty, FloatProperty, BoolProperty,
+    PointerProperty, FloatProperty, BoolProperty, EnumProperty,
 )
 from ..ui import icons
 from ..io import import_anm
@@ -44,8 +45,83 @@ from .wiggle_bake_common import (
 #  Hair physics parameter mapping (intensity 1-20)
 # ---------------------------------------------------------------------------
 
-def get_hair_params(intensity):
-    """Map 1-20 intensity slider to Wiggle 2 params tuned for hair bones.
+# ---------------------------------------------------------------------------
+#  Hair type presets
+#
+#  A single parameter curve doesn't fit every hair shape. A short ponytail
+#  has 2-4 bones that mostly need to swing; long loose hair has 6-10 bones
+#  that need to flow and hang under gravity; twin-tails sit on the sides
+#  of the head and need gentle gravity plus tighter chain coupling so they
+#  don't cross each other. Each preset tweaks stiffness, gravity, mass,
+#  and damping-floor independently.
+#
+#  ponytail    — short/medium single chain off the back of the head
+#  long_loose  — long free-flowing hair (6+ bones, or multiple side/back
+#                chains) that needs to hang more and move more softly
+#  short_bob   — short hair with barely perceptible motion
+#  twin_tails  — side tails / pigtails
+#  custom      — no preset, pure intensity-based defaults (legacy behavior)
+# ---------------------------------------------------------------------------
+
+_HAIR_TYPE_PRESETS = {
+    'ponytail': {
+        'stiff_hi':   400.0,   # slider=1
+        'stiff_lo':    40.0,   # slider=20
+        'damp_hi':      8.0,
+        'damp_lo':      0.35,
+        'grav_lo':      0.05,
+        'grav_hi':      0.35,
+        'mass_hi':      0.15,
+        'mass_lo':      1.2,
+        'stretch_hi':   0.0,
+        'stretch_lo':   0.04,
+    },
+    'long_loose': {
+        # Long hair: much softer stiffness, more gravity so it hangs,
+        # slightly heavier mass so bones at the tip don't whip.
+        'stiff_hi':   260.0,
+        'stiff_lo':    18.0,
+        'damp_hi':      6.0,
+        'damp_lo':      0.30,
+        'grav_lo':      0.15,
+        'grav_hi':      0.65,
+        'mass_hi':      0.25,
+        'mass_lo':      1.8,
+        'stretch_hi':   0.0,
+        'stretch_lo':   0.06,
+    },
+    'short_bob': {
+        # Very subtle: stiff, light, barely any gravity.
+        'stiff_hi':   600.0,
+        'stiff_lo':    90.0,
+        'damp_hi':     10.0,
+        'damp_lo':      0.60,
+        'grav_lo':      0.02,
+        'grav_hi':      0.15,
+        'mass_hi':      0.10,
+        'mass_lo':      0.80,
+        'stretch_hi':   0.0,
+        'stretch_lo':   0.02,
+    },
+    'twin_tails': {
+        # Side tails: slightly stiffer than ponytail so they don't cross,
+        # lower gravity so they stay to the sides, firmer damping floor.
+        'stiff_hi':   480.0,
+        'stiff_lo':    55.0,
+        'damp_hi':      8.0,
+        'damp_lo':      0.45,
+        'grav_lo':      0.03,
+        'grav_hi':      0.25,
+        'mass_hi':      0.15,
+        'mass_lo':      1.0,
+        'stretch_hi':   0.0,
+        'stretch_lo':   0.03,
+    },
+}
+
+
+def get_hair_params(intensity, hair_type='ponytail'):
+    """Map (1-20 intensity, hair_type) to Wiggle 2 params tuned for hair bones.
 
     Hair differences vs breast bones:
       - gravity is noticeable (hair hangs and swings visibly)
@@ -57,19 +133,23 @@ def get_hair_params(intensity):
     t = max(0.0, min(1.0, (intensity - 1) / 19.0))
     t = t * t  # quadratic bias: natural feel in the lower half
 
+    p = _HAIR_TYPE_PRESETS.get(hair_type, _HAIR_TYPE_PRESETS['ponytail'])
+
     return {
-        'stiff':   lerp_exp(400.0, 40.0, t),   # lower than boobs; hair is flexible
-        'damp':    lerp_exp(8.0,   0.35, t),    # floor 0.35 prevents fly-away
-        'gravity': lerp(0.05, 0.35, t),         # visible gravity — hair hangs
-        'mass':    lerp_exp(0.15,  1.2,  t),    # light strands
-        'stretch': lerp(0.0,  0.04, t),         # minimal stretch
+        'stiff':   lerp_exp(p['stiff_hi'], p['stiff_lo'], t),
+        'damp':    lerp_exp(p['damp_hi'],  p['damp_lo'],  t),
+        'gravity': lerp(p['grav_lo'], p['grav_hi'], t),
+        'mass':    lerp_exp(p['mass_hi'],  p['mass_lo'],  t),
+        'stretch': lerp(p['stretch_hi'], p['stretch_lo'], t),
         'chain':   True,
     }
 
 
-def _apply_wiggle(context, arm, bone_names, intensity):
+def _apply_wiggle(context, arm, bone_names, intensity, hair_type='ponytail'):
     """Configure Wiggle 2 on hair bones with intensity-mapped parameters."""
-    return configure_wiggle_bones(context, arm, bone_names, get_hair_params(intensity))
+    return configure_wiggle_bones(
+        context, arm, bone_names, get_hair_params(intensity, hair_type)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -103,15 +183,25 @@ _HAIR_COLL_RADIUS_OVERRIDES = {
 
 
 def _create_collision_meshes(context, armature_obj, coll_bone_names, sphere_factor=1.0):
-    """Create temporary icosphere colliders bone-parented to body bones.
+    """Create temporary icosphere colliders that follow body bones.
 
     For each collision bone, creates icospheres along the bone's length to
     approximate a capsule. Head and neck bones get special treatment: larger
     radii and more coverage since hair wraps around them fully.
 
-    The spheres are bone-parented so they follow the animated skeleton.
-    They are hidden from viewport but remain evaluable by Blender's depsgraph,
-    which is all that closest_point_on_mesh needs.
+    CRITICAL — uses Copy Location + Copy Rotation constraints instead of
+    bone-parenting. Bone-parenting inherits the bone's scale, and many
+    imported .anm files have bones with scale=0 on some axis for squash
+    poses. A sphere that inherits scale=0 has a SINGULAR world matrix,
+    and Wiggle 2's collide() calls cmw.inverted() on it — which raises
+    ValueError: matrix does not have an inverse. The frame_change_post
+    handler aborts, all subsequent frames re-raise, hair physics freezes
+    from that frame to the end. This was the "frame 157 → T-pose" bug.
+
+    Copy Location + Copy Rotation copy only the bone's position and
+    orientation, NOT its scale. The sphere keeps its own clean (r,r,r)
+    scale so its world matrix is always invertible regardless of what
+    the bone does.
 
     Returns (collection, [objects]) for later cleanup via _cleanup_collision_meshes().
     Returns (None, []) if no valid collision bones exist.
@@ -187,20 +277,33 @@ def _create_collision_meshes(context, armature_obj, coll_bone_names, sphere_fact
             ]
 
         for i, (t, r) in enumerate(placements):
-            y_offset = bone_len * t
-
             obj_name = f"__hc_{bone_name}_{i}"
             obj = bpy.data.objects.new(obj_name, template_mesh)
-            obj.location = (0, y_offset, 0)
+            obj.location = (0.0, 0.0, 0.0)
             obj.scale = (r, r, r)
             obj.hide_viewport = True
             obj.hide_render = True
             collection.objects.link(obj)
 
-            # Bone-parent: the sphere follows the collision bone's animation.
-            obj.parent = armature_obj
-            obj.parent_type = 'BONE'
-            obj.parent_bone = bone_name
+            # Follow the bone via constraints, NOT bone-parenting. Copy
+            # Location + Copy Rotation never propagate the bone's scale,
+            # so the sphere's world matrix stays invertible even when the
+            # animated bone has a zero-scale axis.
+            cl = obj.constraints.new(type='COPY_LOCATION')
+            cl.target      = armature_obj
+            cl.subtarget   = bone_name
+            # head_tail: 0 = bone head, 1 = bone tail. For t > 1 (extra
+            # sphere above the head), we approximate with use_bbone_shape
+            # not applicable here — clamp to 1.0 and rely on the sphere
+            # radius to still cover hair draped over the crown.
+            cl.head_tail   = min(1.0, max(0.0, t))
+            cl.use_offset  = False
+
+            cr = obj.constraints.new(type='COPY_ROTATION')
+            cr.target      = armature_obj
+            cr.subtarget   = bone_name
+            cr.use_offset  = False
+
             created.append(obj)
 
     if not created:
@@ -240,13 +343,18 @@ def _setup_hair_collision_props(armature_obj, bone_names, coll_collection):
         # Hair strand collision radius: keeps the bone this far from surfaces.
         # Too small → hair visually clips; too large → hair floats above body.
         pb.wiggle_radius   = max(0.008, bone_len * 0.12)
-        # Friction: 0 = perfectly slippery, 1 = sticks to the surface.
-        # 0.3 lets hair slide naturally along shoulders/arms.
-        pb.wiggle_friction = 0.3
-        pb.wiggle_bounce   = 0.0
-        # Sticky margin: keeps hair near surfaces it's already touching,
-        # preventing immediate detachment on small movements.
-        pb.wiggle_sticky   = 0.005
+        # Friction must stay LOW. In physics.collide() the friction value
+        # drives a per-frame lerp of the hair position toward the cached
+        # contact point. On long clips this compounds: after ~100 frames of
+        # on-and-off contact with head/shoulders the velocity is damped to
+        # zero and the bone is effectively welded to the surface — the
+        # "hair stops moving mid-animation" bug.
+        pb.wiggle_friction = 0.05
+        pb.wiggle_bounce   = 0.1
+        # Sticky margin MUST be 0. Any positive value keeps `collision_ob`
+        # truthy across frames, which keeps the friction-drag active even
+        # after the bone has moved past the surface → progressive stiffening.
+        pb.wiggle_sticky   = 0.0
 
 
 def _clear_hair_collision_props(armature_obj, bone_names):
@@ -287,6 +395,11 @@ def _cleanup_collision_meshes(collection, objects):
 
 class HairBoneItem(PropertyGroup):
     bone_name: StringProperty(name="Bone", default="")
+    # Which branch this bone belongs to. The physics doesn't care — Wiggle 2
+    # chains bones via their parent relationship in the armature — but
+    # grouping bones by branch in the UI makes it much easier to handle
+    # multi-chain hair (back / left / right tails, twin tails, etc).
+    branch: IntProperty(name="Branch", default=0, min=0, max=7)
 
 
 class HairAnimListItem(PropertyGroup):
@@ -304,10 +417,38 @@ class HairPhysicsProperties(PropertyGroup):
     bones:             CollectionProperty(type=HairBoneItem)
     active_bone_index: IntProperty(default=0)
 
+    # How many hair branches the character has. 1 = single chain (ponytail),
+    # 2 = left+right (twin tails / split back), 3 = center+left+right, etc.
+    # Bones are grouped by branch in the UI. Physics doesn't change.
+    num_branches: IntProperty(
+        name="Branches",
+        description="How many separate hair chains this character has. "
+                    "Use 1 for a ponytail, 2 for twin tails, 3+ for back + "
+                    "side tails or multi-branch long hair",
+        default=1, min=1, max=6,
+    )
+
     jiggle_intensity: IntProperty(
         name="Hair Intensity",
         description="1 = barely moves, 10 = natural sway, 20 = exaggerated",
         default=8, min=1, max=20
+    )
+
+    # Preset tuning curve. Different hair shapes need different stiffness,
+    # gravity, and mass floors; one curve can't cover ponytail AND long loose
+    # hair AND short bob. See _HAIR_TYPE_PRESETS for the actual values.
+    hair_type: EnumProperty(
+        name="Hair Type",
+        description="Pick the preset closest to this character's hairstyle. "
+                    "Each preset tunes stiffness, gravity, and mass floors "
+                    "differently — one curve doesn't fit every hair shape",
+        items=[
+            ('ponytail',   "Ponytail",    "Short/medium single chain — default"),
+            ('long_loose', "Long / Loose","Long free-flowing hair (6+ bones or multi-branch). Softer, more gravity"),
+            ('short_bob',  "Short / Bob", "Very subtle motion — stiff, low gravity"),
+            ('twin_tails', "Twin Tails",  "Side tails / pigtails. Firmer, low gravity, stay on the sides"),
+        ],
+        default='ponytail',
     )
     status_text:        StringProperty(default="Ready")
     backup_action_name: StringProperty(default="")
@@ -365,7 +506,8 @@ def _get_bone_names(props):
 #  Bake pipeline
 # ---------------------------------------------------------------------------
 
-def _bake_hair(context, arm, bone_names, intensity, coll_collection=None):
+def _bake_hair(context, arm, bone_names, intensity, coll_collection=None,
+               hair_type='ponytail'):
     """Detect loop, preroll, bake with optional real-time collision.
 
     Same pipeline as boobs but with real-time collision mesh support
@@ -390,7 +532,7 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None):
 
     eff = intensity if is_loop else min(intensity, 13)
     if eff != intensity:
-        _apply_wiggle(context, arm, bone_names, eff)
+        _apply_wiggle(context, arm, bone_names, eff, hair_type)
 
     select_armature(context, arm)
     bpy.ops.object.mode_set(mode='POSE')
@@ -456,15 +598,19 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None):
         stored = {}
         scene.wiggle.is_preroll = True
 
-        # Main cycle
+        # Main cycle. Skip NaN frames — one bad frame used to leave every
+        # subsequent bone pose at identity (the "frame 157 → T-pose" bug).
         for f in range(frame_start, frame_end + 1):
             scene.frame_set(f)
             for pb in physics_pbs:
-                stored[(pb.name, f)] = (
-                    tuple(pb.rotation_quaternion),
-                    tuple(pb.location),
-                    tuple(pb.scale),
-                )
+                q = tuple(pb.rotation_quaternion)
+                loc = tuple(pb.location)
+                sc  = tuple(pb.scale)
+                if not (all(math.isfinite(v) for v in q) and
+                        all(math.isfinite(v) for v in loc) and
+                        all(math.isfinite(v) for v in sc)):
+                    continue
+                stored[(pb.name, f)] = (q, loc, sc)
 
         # Extra settling pass for first frames
         SETTLE = 8
@@ -472,11 +618,14 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None):
         for f in range(frame_start, settle_end + 1):
             scene.frame_set(f)
             for pb in physics_pbs:
-                stored[(pb.name, f)] = (
-                    tuple(pb.rotation_quaternion),
-                    tuple(pb.location),
-                    tuple(pb.scale),
-                )
+                q = tuple(pb.rotation_quaternion)
+                loc = tuple(pb.location)
+                sc  = tuple(pb.scale)
+                if not (all(math.isfinite(v) for v in q) and
+                        all(math.isfinite(v) for v in loc) and
+                        all(math.isfinite(v) for v in sc)):
+                    continue
+                stored[(pb.name, f)] = (q, loc, sc)
 
         scene.wiggle.is_preroll = False
 
@@ -503,21 +652,93 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None):
                         fc.keyframe_points.insert(f, val, options={'FAST', 'REPLACE'})
                     fc.update()
     else:
-        # Non-loop: just reset and bake
+        # --- NON-LOOP: MANUAL FRAME-BY-FRAME BAKE ---
+        #
+        # Previously this path used bpy.ops.nla.bake, which had two problems:
+        #   1) It never stripped existing physics keyframes first, so stale
+        #      keys from a previous preview leaked in.
+        #   2) If Wiggle 2's NaN-detection (physics.py:266) fired mid-bake on
+        #      a specific frame, reset_bone() snapped the bone to identity,
+        #      and if whatever produced the NaN persisted (e.g. the rig
+        #      enters a pose where a collision mesh engulfs the hair), EVERY
+        #      subsequent frame baked an identity quaternion — the bone
+        #      would flip to T-pose at some frame N and stay there until
+        #      frame_end. This was the "hair stops at frame 157 in a 262-
+        #      frame animation" bug.
+        #
+        # The manual bake gives us per-frame visibility and — combined with
+        # the post-bake clamp/spike passes — stops one bad frame from
+        # corrupting everything downstream of it.
+        cur_action = arm.animation_data.action
+        if cur_action:
+            strip_physics_keyframes(cur_action, bone_names)
         scene.wiggle.loop = False
+
+        # Reset physics cleanly at frame 0 (bind pose), then step forward.
+        scene.frame_set(0)
         bpy.ops.wiggle.reset()
-        bpy.ops.wiggle.select()
-        try:
-            bpy.ops.nla.bake(
-                frame_start=frame_start, frame_end=frame_end,
-                only_selected=True, visual_keying=True,
-                use_current_action=True, bake_types={'POSE'}
-            )
-        except Exception as e:
+        scene.frame_set(frame_start)
+        bpy.ops.wiggle.reset()
+
+        physics_pbs = [arm.pose.bones[n] for n in bone_names
+                       if n and n in arm.pose.bones]
+        action = arm.animation_data.action
+        if not action:
             scene.wiggle.iterations = old_iterations
             if coll_collection:
                 _clear_hair_collision_props(arm, bone_names)
-            return False, f"Bake failed: {e}"
+            return False, "No action to bake into"
+
+        # Phase 1: run physics frame by frame, store values.
+        # is_preroll=True suppresses the "frame<=frame_start → reset" path
+        # in wiggle_post (physics.py:514) so the physics state carries
+        # from the start frame forward without being re-zeroed.
+        stored = {}
+        scene.wiggle.is_preroll = True
+        try:
+            for f in range(frame_start, frame_end + 1):
+                scene.frame_set(f)
+                for pb in physics_pbs:
+                    q = tuple(pb.rotation_quaternion)
+                    loc = tuple(pb.location)
+                    sc  = tuple(pb.scale)
+                    # Guard against NaN from the sim. If any channel is
+                    # non-finite, skip this frame entirely — the post-bake
+                    # pass will fill it via LINEAR interpolation from the
+                    # neighbors. This stops one bad frame from locking the
+                    # bone to identity for the rest of the animation.
+                    if not (all(math.isfinite(v) for v in q) and
+                            all(math.isfinite(v) for v in loc) and
+                            all(math.isfinite(v) for v in sc)):
+                        continue
+                    stored[(pb.name, f)] = (q, loc, sc)
+        finally:
+            scene.wiggle.is_preroll = False
+
+        # Phase 2: insert keyframes. Missing entries (NaN frames, if any)
+        # are simply not inserted, leaving Blender to LINEAR-interpolate
+        # across the gap from surrounding valid frames.
+        for bname in bone_names:
+            if not bname:
+                continue
+            for prop, count in [('rotation_quaternion', 4), ('location', 3), ('scale', 3)]:
+                dp = f'pose.bones["{bname}"].{prop}'
+                for i in range(count):
+                    fc = action.fcurves.find(dp, index=i)
+                    if fc is None:
+                        fc = action.fcurves.new(dp, index=i, action_group=bname)
+                    for f in range(frame_start, frame_end + 1):
+                        vals = stored.get((bname, f))
+                        if vals is None:
+                            continue
+                        if prop == 'rotation_quaternion':
+                            val = vals[0][i]
+                        elif prop == 'location':
+                            val = vals[1][i]
+                        else:
+                            val = vals[2][i]
+                        fc.keyframe_points.insert(f, val, options={'FAST', 'REPLACE'})
+                    fc.update()
 
     scene.wiggle.iterations = old_iterations
 
@@ -527,6 +748,11 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None):
     # --- Post-bake ---
     action = arm.animation_data.action
     if action:
+        # Spike smoother catches isolated 1-frame physics pops. Non-cascading
+        # so legitimate fast swings are preserved. No rotation clamp is used
+        # for hair — long hair legitimately swings 90°+ from rest on dramatic
+        # end poses, and the phase-1 NaN guard already handles actual blow-
+        # ups without clipping natural motion.
         smooth_physics_spikes(action, bone_names)
         _set_linear_interpolation(action, bone_names)
         _clean_tpose_keyframes(action, bone_names)
@@ -607,8 +833,11 @@ class HAIR_OT_AddBone(Operator):
     bl_label   = "Add Bone"
     bl_options = {'REGISTER'}
 
+    branch: IntProperty(default=0, min=0, max=7)
+
     def execute(self, context):
-        context.scene.hair_physics.bones.add()
+        item = context.scene.hair_physics.bones.add()
+        item.branch = self.branch
         return {'FINISHED'}
 
 
@@ -617,11 +846,59 @@ class HAIR_OT_RemoveBone(Operator):
     bl_label   = "Remove Bone"
     bl_options = {'REGISTER'}
 
+    # If -1, remove the last bone globally. Otherwise, remove the last bone
+    # whose branch index matches.
+    branch: IntProperty(default=-1)
+
     def execute(self, context):
         props = context.scene.hair_physics
-        if props.bones:
-            props.bones.remove(len(props.bones) - 1)
-            props.active_bone_index = max(0, len(props.bones) - 1)
+        if not props.bones:
+            return {'FINISHED'}
+
+        if self.branch < 0:
+            target_idx = len(props.bones) - 1
+        else:
+            target_idx = -1
+            for i in range(len(props.bones) - 1, -1, -1):
+                if props.bones[i].branch == self.branch:
+                    target_idx = i
+                    break
+            if target_idx < 0:
+                return {'FINISHED'}
+
+        props.bones.remove(target_idx)
+        props.active_bone_index = max(0, len(props.bones) - 1)
+        return {'FINISHED'}
+
+
+class HAIR_OT_DeleteBranch(Operator):
+    """Delete an entire hair branch — all bones in that branch plus the slot"""
+    bl_idname  = "hair_physics.delete_branch"
+    bl_label   = "Delete Branch"
+    bl_options = {'REGISTER'}
+
+    branch: IntProperty(default=0, min=0, max=7)
+
+    def execute(self, context):
+        props = context.scene.hair_physics
+
+        # Remove all bones belonging to the deleted branch.
+        to_remove = [i for i, it in enumerate(props.bones)
+                     if it.branch == self.branch]
+        for i in reversed(to_remove):
+            props.bones.remove(i)
+
+        # Shift higher branch indices down so there are no gaps.
+        for it in props.bones:
+            if it.branch > self.branch:
+                it.branch -= 1
+
+        # Decrement the branch count, but keep at least 1 so the UI still
+        # renders a valid state.
+        props.num_branches = max(1, props.num_branches - 1)
+        props.active_bone_index = max(0, len(props.bones) - 1)
+
+        self.report({'INFO'}, f"Deleted branch {self.branch + 1}")
         return {'FINISHED'}
 
 
@@ -657,7 +934,8 @@ class HAIR_OT_Preview(Operator):
 
         strip_physics_keyframes(action, bone_names)
         arm.wiggle_freeze = False
-        configured = _apply_wiggle(context, arm, bone_names, props.jiggle_intensity)
+        configured = _apply_wiggle(context, arm, bone_names,
+                                   props.jiggle_intensity, props.hair_type)
         if not configured:
             self.report({'ERROR'}, "None of the listed bones found in armature")
             return {'CANCELLED'}
@@ -676,7 +954,8 @@ class HAIR_OT_Preview(Operator):
 
         props.status_text = "Baking hair physics..."
         ok, msg = _bake_hair(context, arm, bone_names, props.jiggle_intensity,
-                             coll_collection=coll_collection)
+                             coll_collection=coll_collection,
+                             hair_type=props.hair_type)
 
         # Clean up collision meshes (done with the simulation).
         if coll_collection:
@@ -693,7 +972,7 @@ class HAIR_OT_Preview(Operator):
             n_fixed = post_bake_collision_correct(
                 context, arm, bone_names, coll_bones,
                 sphere_factor=props.collision_sphere_factor,
-                max_rot_deg=8,
+                max_rot_deg=25,
             )
             if n_fixed:
                 self.report({'INFO'}, f"Collision cleanup: corrected {n_fixed} frames")
@@ -860,9 +1139,38 @@ class HAIR_OT_LoadAnimation(Operator):
         select_armature(context, armature_obj)
         armature_obj.wiggle_freeze = False
 
-        # Reset hair bones to identity before loading.
+        # Full physics-state reset: a previous preview leaves the current action
+        # with baked hair keyframes, a stale backup action, and possibly live
+        # wiggle properties on the bones. All of that must be cleared before the
+        # new action is assigned, otherwise the hair pose from the previous clip
+        # leaks into the new one (no reset between animations bug).
+        hair_bones = _get_bone_names(props)
+        if hair_bones:
+            clear_wiggle_from_bones(context, armature_obj, hair_bones)
+
+        # Drop the backup action left behind by the previous preview — it
+        # references the previous animation, not the one we're loading.
+        if props.backup_action_name:
+            old_bkp = bpy.data.actions.get(props.backup_action_name)
+            if old_bkp:
+                old_bkp.use_fake_user = False
+                bpy.data.actions.remove(old_bkp)
+            props.backup_action_name = ""
+
+        # Strip any hair keyframes still sitting on the CURRENT action (the one
+        # that was previewed) so switching away doesn't keep stale physics
+        # around as a cached action.
+        cur_act = armature_obj.animation_data and armature_obj.animation_data.action
+        if cur_act and hair_bones:
+            strip_physics_keyframes(cur_act, hair_bones)
+
+        # Go to frame 0 so the wiggle handler's bind-frame reset path runs
+        # (clears velocity/position state) before the new action is assigned.
+        context.scene.frame_set(0)
+
+        # Reset hair bones to identity (pose-level) before loading.
         bpy.ops.object.mode_set(mode='POSE')
-        for bname in _get_bone_names(props):
+        for bname in hair_bones:
             pb = armature_obj.pose.bones.get(bname)
             if pb:
                 pb.location            = (0.0, 0.0, 0.0)
@@ -870,6 +1178,9 @@ class HAIR_OT_LoadAnimation(Operator):
                 pb.rotation_euler      = (0.0, 0.0, 0.0)
                 pb.scale               = (1.0, 1.0, 1.0)
         bpy.ops.object.mode_set(mode='OBJECT')
+
+        armature_obj.wiggle_freeze = False
+        props.status_text = "Ready"
 
         try:
             action_name = self.anim_name or os.path.splitext(os.path.basename(self.filepath))[0]
@@ -969,7 +1280,8 @@ class HAIR_OT_ApplyToAll(Operator):
         disabled_mods, hidden_objs = hide_meshes_for_batch(context)
 
         # Configure wiggle once after mesh hiding.
-        _apply_wiggle(context, armature_obj, bone_names, props.jiggle_intensity)
+        _apply_wiggle(context, armature_obj, bone_names,
+                      props.jiggle_intensity, props.hair_type)
 
         for idx, anim_item in enumerate(props.animations):
             props.status_text = f"Processing {idx + 1}/{total}: {anim_item.name}..."
@@ -1008,11 +1320,13 @@ class HAIR_OT_ApplyToAll(Operator):
 
                 # Re-apply wiggle each iteration: _bake_hair may lower effective
                 # intensity for non-loop clips, so loops that follow need it reset.
-                _apply_wiggle(context, armature_obj, bone_names, props.jiggle_intensity)
+                _apply_wiggle(context, armature_obj, bone_names,
+                              props.jiggle_intensity, props.hair_type)
 
                 ok, msg = _bake_hair(context, armature_obj, bone_names,
                                      props.jiggle_intensity,
-                                     coll_collection=coll_collection)
+                                     coll_collection=coll_collection,
+                                     hair_type=props.hair_type)
                 if not ok:
                     print(f"Bake failed for {anim_item.name}: {msg}")
                     fail_count += 1
@@ -1028,7 +1342,7 @@ class HAIR_OT_ApplyToAll(Operator):
                     post_bake_collision_correct(
                         context, armature_obj, bone_names, coll_bones_for_batch,
                         sphere_factor=props.collision_sphere_factor,
-                        max_rot_deg=8,
+                        max_rot_deg=25,
                         precomputed_radii=precomputed_coll_radii,
                     )
                 # Fix quaternion signs after collision correction
@@ -1129,24 +1443,79 @@ class HAIR_PT_Physics(Panel):
 
         layout.box().label(text=props.status_text, icon='INFO')
 
-        # --- Bone list ---
+        # --- Bone list (grouped by branch) ---
         box = layout.box()
-        box.label(text="Hair Bones", icon='BONE_DATA')
+        row = box.row(align=True)
+        row.label(text="Hair Bones", icon='BONE_DATA')
+        row.prop(props, "num_branches", text="Branches")
+
         if arm:
-            for i, item in enumerate(props.bones):
-                box.row(align=True).prop_search(
-                    item, "bone_name", arm.pose, "bones", text=f"Bone {i+1}"
-                )
-            row = box.row(align=True)
-            row.operator("hair_physics.add_bone",    text="Add Bone", icon='ADD')
-            row.operator("hair_physics.remove_bone", text="Remove",   icon='REMOVE')
+            nb = max(1, props.num_branches)
+            # Auto-migrate: if num_branches shrank, collapse out-of-range
+            # branch ids onto the last valid branch so those bones don't
+            # vanish from the UI.
+            max_branch = nb - 1
+            for item in props.bones:
+                if item.branch > max_branch:
+                    item.branch = max_branch
+
+            # For a single-branch setup, draw a flat list (same UX as before).
+            if nb == 1:
+                idx = 0
+                for item in props.bones:
+                    idx += 1
+                    box.row(align=True).prop_search(
+                        item, "bone_name", arm.pose, "bones", text=f"Bone {idx}"
+                    )
+                row = box.row(align=True)
+                op = row.operator("hair_physics.add_bone",    text="Add Bone", icon='ADD')
+                op.branch = 0
+                op_rm = row.operator("hair_physics.remove_bone", text="Remove",   icon='REMOVE')
+                op_rm.branch = -1
+            else:
+                # Multi-branch: one labelled sub-box per branch.
+                # Suggested names help users know which chain to use for what
+                # ("Back", "Left", "Right" for 3 branches, etc).
+                _branch_labels = {
+                    2: ["Left",  "Right"],
+                    3: ["Back",  "Left",  "Right"],
+                    4: ["Back",  "Left",  "Right", "Front"],
+                    5: ["Back",  "Left",  "Right", "Front", "Top"],
+                    6: ["Back",  "Left",  "Right", "Front", "Top", "Extra"],
+                }
+                labels = _branch_labels.get(nb, [f"Branch {i+1}" for i in range(nb)])
+                for b_idx in range(nb):
+                    sub = box.box()
+                    sub.label(text=f"Branch {b_idx + 1}: {labels[b_idx]}",
+                              icon='GROUP_BONE')
+                    branch_bones = [(i, it) for i, it in enumerate(props.bones)
+                                    if it.branch == b_idx]
+                    if not branch_bones:
+                        sub.label(text="(no bones yet)", icon='INFO')
+                    else:
+                        for count, (_, item) in enumerate(branch_bones, start=1):
+                            sub.row(align=True).prop_search(
+                                item, "bone_name", arm.pose, "bones",
+                                text=f"Bone {count}"
+                            )
+                    row = sub.row(align=True)
+                    op = row.operator("hair_physics.add_bone",
+                                      text="Add Bone", icon='ADD')
+                    op.branch = b_idx
+                    op_rm = row.operator("hair_physics.remove_bone",
+                                         text="Remove Last", icon='REMOVE')
+                    op_rm.branch = b_idx
+                    op_del = row.operator("hair_physics.delete_branch",
+                                          text="", icon='TRASH')
+                    op_del.branch = b_idx
         else:
             box.label(text="No armature in scene", icon='ERROR')
 
-        # --- Intensity ---
+        # --- Intensity + hair type ---
         box = layout.box()
         box.label(text="Hair Settings", icon='MOD_WAVE')
         col = box.column(align=True)
+        col.prop(props, "hair_type", text="Type")
         col.prop(props, "jiggle_intensity", slider=True)
         row = col.row()
         row.alignment = 'CENTER'
@@ -1251,6 +1620,7 @@ classes = [
     HAIR_OT_SelectAllCollisionBones,
     HAIR_OT_AddBone,
     HAIR_OT_RemoveBone,
+    HAIR_OT_DeleteBranch,
     HAIR_OT_Preview,
     HAIR_OT_Undo,
     HAIR_OT_BrowseFolder,

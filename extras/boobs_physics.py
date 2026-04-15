@@ -21,6 +21,9 @@ from .physics_common import (
     configure_wiggle_bones, clear_wiggle_from_bones, strip_physics_keyframes,
     find_default_collision_bones, post_bake_collision_correct,
     precompute_collision_radii, hide_meshes_for_batch, restore_meshes_after_batch,
+    create_temp_collision_meshes, setup_wiggle_collision_props,
+    clear_wiggle_collision_props, cleanup_temp_collision_meshes,
+    smooth_physics_spikes, clamp_local_rotation_from_identity,
 )
 from .wiggle_bake_common import (
     _detect_animation_loops,
@@ -49,11 +52,18 @@ def get_jiggle_params(intensity):
     perceptually distinct change. Floor values on stiff and damp are
     chosen to keep the spring physically stable at all intensities:
 
-      stiff floor 55: spring always has enough restoring force to pull
-        the bone back before velocity can accumulate infinitely.
-      damp floor 0.25: at 24fps (dt=0.042), effective per-frame factor =
-        1 - 0.25*0.042 = 0.9895 — still very bouncy but oscillation
-        decays rather than growing. Below this the sim becomes chaotic.
+      stiff floor 110: previously 55 — too soft. Under fast character
+        motion (jumping, spinning, dashing) the parent bone moves several
+        bone-lengths per frame and a soft spring can't keep up, so the
+        breast tail overshoots into the body. 110 still feels bouncy at
+        slider=20 but holds its shape under motion.
+
+      damp floor 0.6: previously 0.25 — way too low. At 60fps dt=0.0167,
+        effective per-frame factor with damp=0.25 is 1 - 0.25*0.0167 =
+        0.9958, i.e. velocity barely decays. After 100 frames of fast
+        character motion, residual velocity compounds into pops/clipping.
+        0.6 gives per-frame 0.99 — still bouncy but oscillation reliably
+        decays between frames of fast input.
 
     stretch is intentionally near-zero. Bone stretching looks distorted
     for breast bones; jiggle should come purely from rotation.
@@ -62,10 +72,10 @@ def get_jiggle_params(intensity):
     t = t * t                                         # quadratic bias: slider 10 ≈ old slider 5
 
     return {
-        'stiff':   lerp_exp(580.0, 55.0, t),   # high = snap-back, low = floaty
-        'damp':    lerp_exp(10.0, 0.25, t),    # high = dies fast, low = sustained bounce
+        'stiff':   lerp_exp(650.0, 110.0, t),  # firmer floor — resists runaway velocity
+        'damp':    lerp_exp(12.0,   0.60, t),  # firmer floor — kills residual velocity
         'gravity': lerp(0.0, 0.03, t),         # near-zero — any more makes them droop
-        'mass':    lerp_exp(0.3, 1.8, t),      # heavier at high intensity for momentum
+        'mass':    lerp_exp(0.3, 1.5, t),      # slightly lighter max — less momentum
         'stretch': lerp(0.0, 0.02, t),         # tiny — stretching looks distorted
         'chain':   True,
     }
@@ -204,7 +214,61 @@ def _ramp_physics_params(physics_pbs, target_params, t):
         pb.wiggle_gravity = grav
 
 
-def bake_wiggle_for_current_action(context, armature_obj, bone_names, intensity):
+# ---------------------------------------------------------------------------
+#  Real-time collision wiring for breast bones
+#
+#  Historically boobs only ran post-bake collision correction. That meant the
+#  simulation itself let the breast bones punch through arms and the ribcage,
+#  producing huge per-frame pops the post-pass had to snap out — the visible
+#  "clipping/glitching" in the bug report.
+#
+#  This mirrors the hair collision setup: temporary icosphere meshes are
+#  bone-parented to the body colliders and wired into Wiggle 2's built-in
+#  closest_point_on_mesh collision so the bones are pushed out in real time
+#  during move()/collide(), not retroactively after baking.
+# ---------------------------------------------------------------------------
+
+# Per-bone-type radius overrides for breast colliders.  Key = substring.
+# Arms/clavicles/shoulders only — spine/chest are NOT colliders for breasts
+# (they're the breast bone's own parent; adding them would push the breast
+# away from the chest).
+_BOOBS_COLL_RADIUS_OVERRIDES = {
+    'clavicle': 0.22,
+    'shoulder': 0.25,
+}
+
+
+def _setup_boobs_collision(armature_obj, bone_names, coll_collection):
+    """Wire Wiggle 2 collision on breast bones with breast-tuned parameters.
+
+    Friction is LOW (0.05) and sticky is 0 — same reasoning as hair: any
+    meaningful friction drags the bone toward the cached contact point each
+    frame, which over a long clip damps velocity to zero and freezes the
+    bone against the surface. Bounce is modest so collisions don't over-push.
+    """
+    # Deselect all bones to avoid PointerProperty copy-to-selected issues.
+    for bone in armature_obj.data.bones:
+        bone.select = False
+
+    arm_mw = armature_obj.matrix_world
+    for bname in bone_names:
+        if not bname:
+            continue
+        pb = armature_obj.pose.bones.get(bname)
+        if not pb:
+            continue
+        bone_len = (arm_mw @ pb.tail - arm_mw @ pb.head).length
+        pb.wiggle_collider_type       = 'Collection'
+        pb.wiggle_collider_collection = coll_collection
+        # Bigger radius than hair — breast bone represents volume, not a strand.
+        pb.wiggle_radius   = max(0.01, bone_len * 0.35)
+        pb.wiggle_friction = 0.05
+        pb.wiggle_bounce   = 0.15
+        pb.wiggle_sticky   = 0.0
+
+
+def bake_wiggle_for_current_action(context, armature_obj, bone_names, intensity,
+                                    coll_collection=None):
     """Bake wiggle physics into the current action.
 
     Loop animations use a ramp-up convergence approach:
@@ -250,6 +314,11 @@ def bake_wiggle_for_current_action(context, armature_obj, bone_names, intensity)
     select_armature(context, armature_obj)
     bpy.ops.object.mode_set(mode='POSE')
 
+    # Wire real-time collision: must happen AFTER apply_wiggle_to_bones
+    # (which clobbers per-bone collider props) and BEFORE the bake loop.
+    if coll_collection:
+        _setup_boobs_collision(armature_obj, bone_names, coll_collection)
+
     armature_obj.wiggle_freeze = False
     scene.wiggle.loop           = is_loop
     scene.wiggle.bake_overwrite = True
@@ -260,6 +329,15 @@ def bake_wiggle_for_current_action(context, armature_obj, bone_names, intensity)
     # frames_elapsed (1 instead of a wild delta from a previous animation).
     scene.frame_set(0)
     bpy.ops.wiggle.reset()
+
+    # Force high solver iteration count during the bake. Default (2) is too
+    # few for breast bones under fast parent motion: each frame the spring
+    # only gets 2 chances to pull the overshot bone back toward rest, and
+    # residual velocity compounds into visible pops/clipping on fast
+    # animations. 10 iterations keeps the constraint solver well ahead of
+    # the integrator and is what hair already uses.
+    old_iterations = scene.wiggle.iterations
+    scene.wiggle.iterations = max(old_iterations, 10)
 
     if is_loop:
         # --- RAMP-UP CONVERGENCE FOR PERFECT LOOPS ---
@@ -398,11 +476,28 @@ def bake_wiggle_for_current_action(context, armature_obj, bone_names, intensity)
                 use_current_action=True, bake_types={'POSE'}
             )
         except Exception as e:
+            scene.wiggle.iterations = old_iterations
+            if coll_collection:
+                clear_wiggle_collision_props(armature_obj, bone_names)
             return False, f"NLA bake failed: {e}"
+
+    scene.wiggle.iterations = old_iterations
+
+    if coll_collection:
+        clear_wiggle_collision_props(armature_obj, bone_names)
 
     # --- Post-bake cleanup ---
     action = armature_obj.animation_data.action
     if action:
+        # Hard cap on per-frame rotation from rest pose. 45° is well beyond
+        # any natural breast jiggle (~15° max) but well below the obvious
+        # physics blowups (60°+) that cause the visible clipping glitches.
+        # This is the last line of defense after iterations/damping tuning.
+        clamp_local_rotation_from_identity(action, bone_names, max_deg=45.0)
+        # Catch isolated 1-frame pops: if a frame's rotation is way off the
+        # midpoint of its neighbors, replace it with that midpoint. Non-
+        # cascading, so legitimate fast jiggle is preserved.
+        smooth_physics_spikes(action, bone_names, max_deg=18.0)
         _set_linear_interpolation(action, bone_names)
         _clean_tpose_keyframes(action, bone_names)
         if is_loop:
@@ -554,23 +649,47 @@ class BOOBS_OT_PreviewPhysics(Operator):
             self.report({'ERROR'}, "Could not find the specified bones in the armature")
             return {'CANCELLED'}
 
+        # --- Real-time collision: create temp icosphere meshes BEFORE bake.
+        # Hair does the same thing. Without this the simulation itself lets
+        # breast bones punch through arms/ribcage on fast motion, and the
+        # post-bake correction has to snap them out — the glitchy behavior
+        # visible in the screenshots.
+        coll_collection = None
+        coll_objects    = []
+        coll_bones      = []
+        if props.collision_enabled:
+            coll_bones = [n.strip() for n in props.collision_bones.split(',') if n.strip()]
+            if coll_bones:
+                props.status_text = "Creating collision meshes..."
+                coll_collection, coll_objects = create_temp_collision_meshes(
+                    context, armature_obj, coll_bones,
+                    sphere_factor=props.collision_sphere_factor,
+                    coll_name="__boobs_coll_temp",
+                    radius_overrides=_BOOBS_COLL_RADIUS_OVERRIDES,
+                )
+
         props.status_text = "Baking physics preview..."
         ok, message = bake_wiggle_for_current_action(
-            context, armature_obj, bone_names, props.jiggle_intensity
+            context, armature_obj, bone_names, props.jiggle_intensity,
+            coll_collection=coll_collection,
         )
+
+        if coll_collection:
+            cleanup_temp_collision_meshes(coll_collection, coll_objects)
 
         if not ok:
             props.status_text = f"Preview failed: {message}"
             self.report({'ERROR'}, message); return {'CANCELLED'}
 
-        if props.collision_enabled or props.boob_self_collision:
-            coll_bones = []
-            if props.collision_enabled:
-                coll_bones = [n.strip() for n in props.collision_bones.split(',') if n.strip()]
-            props.status_text = "Applying collision correction..."
+        # Post-bake safety net: catches any remaining penetrations the real-time
+        # collision missed (fast motion, sub-frame tunneling), plus the
+        # self-collision pass that keeps the two breast bones apart.
+        if coll_bones or props.boob_self_collision:
+            props.status_text = "Final collision cleanup..."
             n_fixed = post_bake_collision_correct(
                 context, armature_obj, bone_names, coll_bones,
                 sphere_factor=props.collision_sphere_factor,
+                max_rot_deg=20,
                 self_coll_enabled=props.boob_self_collision,
                 self_coll_scale=props.boob_self_collision_scale,
             )
@@ -743,12 +862,31 @@ class BOOBS_OT_LoadAnimation(Operator):
         select_armature(context, armature_obj)
         armature_obj.wiggle_freeze = False
 
-        # Reset breast bones to identity BEFORE loading so a mid-playback pose
-        # doesn't contaminate the new action's T-pose frame.
+        # Full physics-state reset: a previous preview leaves baked breast
+        # keyframes on the current action, a stale backup action, and live
+        # wiggle properties on the bones. Clear all of it before assigning the
+        # new action, otherwise the breast pose from the previous clip bleeds
+        # into the next one.
+        breast_bones = [b for b in [props.breast_bone_L, props.breast_bone_R] if b]
+        if breast_bones:
+            clear_wiggle_from_bones(context, armature_obj, breast_bones)
+
+        if props.backup_action_name:
+            old_bkp = bpy.data.actions.get(props.backup_action_name)
+            if old_bkp:
+                old_bkp.use_fake_user = False
+                bpy.data.actions.remove(old_bkp)
+            props.backup_action_name = ""
+
+        cur_act = armature_obj.animation_data and armature_obj.animation_data.action
+        if cur_act and breast_bones:
+            strip_physics_keyframes(cur_act, breast_bones)
+
+        context.scene.frame_set(0)
+
+        # Reset breast bones to identity (pose-level) before loading.
         bpy.ops.object.mode_set(mode='POSE')
-        for bname in [props.breast_bone_L, props.breast_bone_R]:
-            if not bname:
-                continue
+        for bname in breast_bones:
             pb = armature_obj.pose.bones.get(bname)
             if pb:
                 pb.location            = (0.0, 0.0, 0.0)
@@ -756,6 +894,8 @@ class BOOBS_OT_LoadAnimation(Operator):
                 pb.rotation_euler      = (0.0, 0.0, 0.0)
                 pb.scale               = (1.0, 1.0, 1.0)
         bpy.ops.object.mode_set(mode='OBJECT')
+
+        armature_obj.wiggle_freeze = False
 
         try:
             action_name = self.anim_name or os.path.splitext(os.path.basename(self.filepath))[0]
@@ -835,10 +975,19 @@ class BOOBS_OT_ApplyToAll(Operator):
         # Pre-compute collision radii once — they're static (bone_len × factor).
         coll_bones_for_batch   = []
         precomputed_coll_radii = None
+        coll_collection        = None
+        coll_objects           = []
         if props.collision_enabled:
             coll_bones_for_batch = [n.strip() for n in props.collision_bones.split(',') if n.strip()]
             if coll_bones_for_batch:
                 precomputed_coll_radii = precompute_collision_radii(armature_obj, coll_bones_for_batch)
+                # Real-time collision meshes for the whole batch.
+                coll_collection, coll_objects = create_temp_collision_meshes(
+                    context, armature_obj, coll_bones_for_batch,
+                    sphere_factor=props.collision_sphere_factor,
+                    coll_name="__boobs_coll_temp",
+                    radius_overrides=_BOOBS_COLL_RADIUS_OVERRIDES,
+                )
 
         # Hide all meshes to stop Blender recalculating vertex deformations per frame.
         disabled_mods, hidden_objs = hide_meshes_for_batch(context)
@@ -887,7 +1036,8 @@ class BOOBS_OT_ApplyToAll(Operator):
                 apply_wiggle_to_bones(context, armature_obj, bone_names, props.jiggle_intensity)
 
                 ok, msg = bake_wiggle_for_current_action(
-                    context, armature_obj, bone_names, props.jiggle_intensity
+                    context, armature_obj, bone_names, props.jiggle_intensity,
+                    coll_collection=coll_collection,
                 )
                 if not ok:
                     print(f"Bake failed for {anim_item.name}: {msg}")
@@ -898,6 +1048,7 @@ class BOOBS_OT_ApplyToAll(Operator):
                     post_bake_collision_correct(
                         context, armature_obj, bone_names, coll_bones_for_batch,
                         sphere_factor=props.collision_sphere_factor,
+                        max_rot_deg=20,
                         precomputed_radii=precomputed_coll_radii,
                         self_coll_enabled=props.boob_self_collision,
                         self_coll_scale=props.boob_self_collision_scale,
@@ -928,6 +1079,8 @@ class BOOBS_OT_ApplyToAll(Operator):
         ensure_object_mode(context)
         restore_meshes_after_batch(disabled_mods, hidden_objs)
 
+        if coll_collection:
+            cleanup_temp_collision_meshes(coll_collection, coll_objects)
 
         props.status_text = "Ready"
         context.preferences.edit.use_global_undo = user_undo

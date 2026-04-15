@@ -244,8 +244,11 @@ _BONE_TYPE_FACTORS = {
 }
 
 # Boobs: lateral arm bones that physically press against the breast.
-# Clavicle / shoulder are included but sit above the breast — Wiggle 2's
-# sphere-based collision still handles them correctly at runtime.
+# NOTE: spine/chest are intentionally NOT listed. The breast bones are
+# children of the chest — adding the chest as a collider makes the post-bake
+# correction push the breast AWAY from its own parent, producing a float/
+# detach glitch. Torso self-clipping is handled by the simulation stability
+# fixes (iterations, damping, spike smoothing), not by adding colliders.
 COLLISION_BONE_CANDIDATES = [
     'L_Clavicle',        'R_Clavicle',
     'L_Shoulder',        'R_Shoulder',
@@ -822,6 +825,87 @@ def smooth_physics_spikes(action, bone_names, max_deg=20.0):
     return fixed
 
 
+def clamp_local_rotation_from_identity(action, bone_names, max_deg=45.0):
+    """Cap how far each baked rotation_quaternion can be from identity.
+
+    This is the ultimate safety net for physics blowups. If the simulation
+    ever produced a rotation further than ``max_deg`` from the rest pose
+    (identity for a freshly-imported bone), we slerp it back to identity
+    by the fraction needed to bring it inside the cap.
+
+    Used by breast bones: under fast character motion the spring can
+    occasionally overshoot violently, writing a 60°+ rotation keyframe that
+    visibly pops through the body. Clamping at 45° kills the pop without
+    affecting the natural jiggle (normal breast jiggle is < 20°).
+
+    Returns the number of keyframes that were clamped.
+    """
+    bone_set = set(b for b in bone_names if b)
+    max_rad  = math.radians(max_deg)
+    clamped  = 0
+
+    # Group quaternion F-curves by bone.
+    groups = {}
+    for fc in action.fcurves:
+        dp = fc.data_path
+        if 'pose.bones["' not in dp or 'rotation_quaternion' not in dp:
+            continue
+        bname = _parse_bone_name(dp)
+        if bname not in bone_set:
+            continue
+        groups.setdefault(bname, {})[fc.array_index] = fc
+
+    for bname, channels in groups.items():
+        if len(channels) < 4:
+            continue
+
+        kf_maps = {c: {int(kp.co[0]): kp for kp in channels[c].keyframe_points}
+                   for c in range(4)}
+        frames = sorted(
+            set(kf_maps[0]) & set(kf_maps[1]) & set(kf_maps[2]) & set(kf_maps[3])
+        )
+
+        for f in frames:
+            w = kf_maps[0][f].co[1]
+            x = kf_maps[1][f].co[1]
+            y = kf_maps[2][f].co[1]
+            z = kf_maps[3][f].co[1]
+
+            q = MQuat((w, x, y, z))
+            m = q.magnitude
+            if m < 1e-8:
+                continue
+            q = q * (1.0 / m)
+
+            # Angle from identity quaternion (1,0,0,0): 2 * acos(|w|)
+            dot = min(1.0, abs(q.w))
+            angle = 2.0 * math.acos(dot)
+
+            if angle <= max_rad:
+                continue
+
+            # Slerp from identity toward q by the fraction (max_rad / angle).
+            # Identity quaternion is (1,0,0,0) — slerping just scales xyz down
+            # and rebuilds w to keep unit length.
+            # Sign-match q.w to +1 so the short arc is from identity.
+            if q.w < 0.0:
+                q = MQuat((-q.w, -q.x, -q.y, -q.z))
+
+            identity = MQuat((1.0, 0.0, 0.0, 0.0))
+            clamped_q = identity.slerp(q, max_rad / angle)
+
+            kf_maps[0][f].co[1] = clamped_q.w
+            kf_maps[1][f].co[1] = clamped_q.x
+            kf_maps[2][f].co[1] = clamped_q.y
+            kf_maps[3][f].co[1] = clamped_q.z
+            clamped += 1
+
+        for fc in channels.values():
+            fc.update()
+
+    return clamped
+
+
 # ---------------------------------------------------------------------------
 #  Real-time collision mesh helpers (shared by boobs & hair)
 # ---------------------------------------------------------------------------
@@ -905,14 +989,33 @@ def create_temp_collision_meshes(context, armature_obj, coll_bone_names,
         for i, (t, r) in enumerate(placements):
             obj_name = f"{coll_name}_{bone_name}_{i}"
             obj = bpy.data.objects.new(obj_name, template_mesh)
-            obj.location = (0, bone_len * t, 0)
+            obj.location = (0.0, 0.0, 0.0)
             obj.scale = (r, r, r)
             obj.display_type = 'BOUNDS'
             obj.hide_render = True
             collection.objects.link(obj)
-            obj.parent = armature_obj
-            obj.parent_type = 'BONE'
-            obj.parent_bone = bone_name
+
+            # Use Copy Location + Copy Rotation constraints, NOT
+            # bone-parenting. Bone-parenting inherits the bone's scale
+            # — any frame where the animated bone has a zero-scale axis
+            # makes the sphere's world matrix singular, and Wiggle 2's
+            # cmw.inverted() call in collide() raises ValueError:
+            # "matrix does not have an inverse". The frame handler then
+            # aborts every subsequent frame and physics freezes to the
+            # end of the animation. The constraints copy position and
+            # rotation only; the sphere keeps its own clean (r,r,r)
+            # scale, so the world matrix is always invertible.
+            cl = obj.constraints.new(type='COPY_LOCATION')
+            cl.target      = armature_obj
+            cl.subtarget   = bone_name
+            cl.head_tail   = min(1.0, max(0.0, t))
+            cl.use_offset  = False
+
+            cr = obj.constraints.new(type='COPY_ROTATION')
+            cr.target      = armature_obj
+            cr.subtarget   = bone_name
+            cr.use_offset  = False
+
             created.append(obj)
 
     if not created:

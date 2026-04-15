@@ -7,7 +7,7 @@ from mathutils import Vector, Matrix, Euler, Quaternion, geometry
 from bpy.app.handlers import persistent
 from ..ui import icons
 
-DEBUG = True  # Set True to print physics state to console
+DEBUG = False  # Set True to print physics state to console
 
 #return m2 in m1 space
 def relative_matrix(m1,m2):
