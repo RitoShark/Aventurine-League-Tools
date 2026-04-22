@@ -429,8 +429,9 @@ def _clean_tpose_keyframes(action, bone_names):
         else:
             continue
 
-        kp = fc.keyframe_points.insert(0, val, options={'FAST', 'REPLACE'})
-        kp.interpolation = 'CONSTANT'
+        kp = fc.keyframe_points.insert(0, val, options={'FAST'})
+        if kp is not None:
+            kp.interpolation = 'CONSTANT'
         fc.update()
 
 
