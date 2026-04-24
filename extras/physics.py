@@ -680,7 +680,10 @@ class WiggleSelect(bpy.types.Operator):
                 if not b:
                     rebuild = True
                     continue
-                b.bone.select = True
+                if bpy.app.version >= (5, 0, 0):
+                    b.select = True
+                else:
+                    b.bone.select = True
         if rebuild: build_list()
         return {'FINISHED'}
 
@@ -745,7 +748,8 @@ class WiggleBake(bpy.types.Operator):
                     wiggle_bone_names.add(bone.name)
             action = context.object.animation_data.action
             if action:
-                for fcurve in action.fcurves:
+                from .physics_common import get_action_fcurves
+                for fcurve in (get_action_fcurves(action) or []):
                     if 'pose.bones["' not in fcurve.data_path:
                         continue
                     try:

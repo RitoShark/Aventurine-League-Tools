@@ -66,6 +66,74 @@ def get_animations_folder(armature_obj):
     return folder if os.path.isdir(folder) else None
 
 
+_IS_BLENDER_5 = bpy.app.version >= (5, 0, 0)
+
+
+def _mode_set(context, armature_obj, mode):
+    """Switch mode using temp_override so Blender 5.0 context propagation isn't required."""
+    with context.temp_override(active_object=armature_obj):
+        bpy.ops.object.mode_set(mode=mode)
+
+
+def set_pb_select(pb, selected):
+    """Set pose-bone selection. Blender 5.0 moved .select from Bone to PoseBone."""
+    if _IS_BLENDER_5:
+        pb.select = selected
+    else:
+        pb.bone.select = selected
+
+
+def deselect_all_pose_bones(armature_obj):
+    """Deselect every bone on the armature (version-aware)."""
+    if _IS_BLENDER_5:
+        for pb in armature_obj.pose.bones:
+            pb.select = False
+    else:
+        for bone in armature_obj.data.bones:
+            bone.select = False
+
+
+def new_fcurve(fcurves, data_path, index, group):
+    """Create a new F-curve on the given fcurves collection (version-aware).
+
+    Blender 4.x: `fcurves.new(data_path, index=i, action_group=...)`.
+    Blender 5.0: channelbag fcurves use the `group_name` kwarg instead.
+    """
+    if _IS_BLENDER_5:
+        return fcurves.new(data_path, index=index, group_name=group)
+    return fcurves.new(data_path, index=index, action_group=group)
+
+
+def get_action_fcurves(action):
+    """Return the fcurves collection for an action (Blender 4.x / 5.0+ compat).
+
+    Blender 4.x: `action.fcurves`.
+    Blender 5.0: fcurves live on the layered-action channelbag:
+        `action.layers[0].strips[0].channelbag(slot).fcurves`.
+    Returns None if no fcurves collection is accessible (e.g. empty action).
+    """
+    fcurves = getattr(action, 'fcurves', None)
+    if fcurves is not None:
+        return fcurves
+    layers = getattr(action, 'layers', None)
+    if not layers:
+        return None
+    strips = getattr(layers[0], 'strips', None)
+    if not strips:
+        return None
+    strip = strips[0]
+    slots = getattr(action, 'slots', None)
+    if not slots:
+        return None
+    try:
+        cb = strip.channelbag(slots[0])
+    except Exception:
+        return None
+    if cb is None:
+        return None
+    return getattr(cb, 'fcurves', None)
+
+
 def ensure_object_mode(context):
     """Safely switch to object mode without raising on poll failure."""
     try:
@@ -110,7 +178,7 @@ def configure_wiggle_bones(context, armature_obj, bone_names, params):
     """
     ensure_physics_registered()
     select_armature(context, armature_obj)
-    bpy.ops.object.mode_set(mode='POSE')
+    _mode_set(context, armature_obj, 'POSE')
 
     context.scene.wiggle_enable = True
     armature_obj.wiggle_enable = True
@@ -118,11 +186,10 @@ def configure_wiggle_bones(context, armature_obj, bone_names, params):
     armature_obj.wiggle_freeze = False
 
     # Deselect all bones once (avoids expensive operator call per bone).
-    for bone in armature_obj.data.bones:
-        bone.select = False
+    deselect_all_pose_bones(armature_obj)
 
     configured = []
-    prev_bone = None
+    prev_pb = None
     for bname in bone_names:
         if not bname:
             continue
@@ -130,9 +197,9 @@ def configure_wiggle_bones(context, armature_obj, bone_names, params):
         if not pb:
             continue
         # Only one bone selected at a time so update callbacks iterate safely.
-        if prev_bone:
-            prev_bone.select = False
-        pb.bone.select = True
+        if prev_pb:
+            set_pb_select(prev_pb, False)
+        set_pb_select(pb, True)
         armature_obj.data.bones.active = pb.bone
 
         pb.wiggle_tail    = True
@@ -146,7 +213,7 @@ def configure_wiggle_bones(context, armature_obj, bone_names, params):
         pb.wiggle_stretch = params['stretch']
         pb.wiggle_chain   = params['chain']
         configured.append(bname)
-        prev_bone = pb.bone
+        prev_pb = pb
 
     from . import physics
     try:
@@ -165,27 +232,26 @@ def clear_wiggle_from_bones(context, armature_obj, bone_names):
     """
     ensure_physics_registered()
     select_armature(context, armature_obj)
-    bpy.ops.object.mode_set(mode='POSE')
+    _mode_set(context, armature_obj, 'POSE')
 
     # Deselect all bones once (avoids expensive operator call per bone).
-    for bone in armature_obj.data.bones:
-        bone.select = False
+    deselect_all_pose_bones(armature_obj)
 
-    prev_bone = None
+    prev_pb = None
     for bname in bone_names:
         if not bname:
             continue
         pb = armature_obj.pose.bones.get(bname)
         if not pb:
             continue
-        if prev_bone:
-            prev_bone.select = False
-        pb.bone.select = True
+        if prev_pb:
+            set_pb_select(prev_pb, False)
+        set_pb_select(pb, True)
         armature_obj.data.bones.active = pb.bone
         pb.wiggle_tail   = False
         pb.wiggle_head   = False
         pb.wiggle_enable = False
-        prev_bone = pb.bone
+        prev_pb = pb
 
     from . import physics
     try:
@@ -204,13 +270,16 @@ def strip_physics_keyframes(action, bone_names):
     from a clean slate rather than stacking on the previous bake.
     """
     bone_set = set(b for b in bone_names if b)
+    fcurves = get_action_fcurves(action)
+    if not fcurves:
+        return
     to_remove = [
-        fc for fc in action.fcurves
+        fc for fc in fcurves
         if 'pose.bones["' in fc.data_path
         and _parse_bone_name(fc.data_path) in bone_set
     ]
     for fc in to_remove:
-        action.fcurves.remove(fc)
+        fcurves.remove(fc)
 
 
 def _parse_bone_name(data_path):
@@ -521,7 +590,7 @@ def post_bake_collision_correct(context, armature_obj, bone_names, coll_bone_nam
     # --- Index quaternion F-curves for the jiggle bones ---
     bone_set = set(b for b in bone_names if b)
     fc_map   = {}  # {bname: {array_index: fcurve}}
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         if 'pose.bones["' not in fc.data_path or 'rotation_quaternion' not in fc.data_path:
             continue
         bname = _parse_bone_name(fc.data_path)
@@ -758,7 +827,7 @@ def smooth_physics_spikes(action, bone_names, max_deg=20.0):
 
     # Group quaternion F-curves by bone.
     quat_fcs = {}
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         dp = fc.data_path
         if 'pose.bones["' not in dp or 'rotation_quaternion' not in dp:
             continue
@@ -846,7 +915,7 @@ def clamp_local_rotation_from_identity(action, bone_names, max_deg=45.0):
 
     # Group quaternion F-curves by bone.
     groups = {}
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         dp = fc.data_path
         if 'pose.bones["' not in dp or 'rotation_quaternion' not in dp:
             continue
@@ -1053,8 +1122,7 @@ def setup_wiggle_collision_props(armature_obj, bone_names, coll_collection,
 
 def clear_wiggle_collision_props(armature_obj, bone_names):
     """Reset Wiggle 2 collision properties on bones to defaults."""
-    for bone in armature_obj.data.bones:
-        bone.select = False
+    deselect_all_pose_bones(armature_obj)
     for bname in bone_names:
         if not bname:
             continue

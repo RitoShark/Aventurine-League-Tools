@@ -22,7 +22,8 @@ from ..io import import_anm
 from ..io import export_anm
 from .physics_common import (
     find_armature, get_animations_folder,
-    ensure_object_mode, select_armature,
+    ensure_object_mode, select_armature, _mode_set, deselect_all_pose_bones,
+    get_action_fcurves, new_fcurve,
     configure_wiggle_bones, clear_wiggle_from_bones, strip_physics_keyframes,
     find_default_hair_collision_bones, post_bake_collision_correct,
     precompute_collision_radii, hide_meshes_for_batch, restore_meshes_after_batch,
@@ -327,8 +328,7 @@ def _setup_hair_collision_props(armature_obj, bone_names, coll_collection):
     # copy PointerProperty values to other selected bones (the copy
     # silently fails for PointerProperty, leaving the selected bone with
     # collider_type='Collection' but collider_collection=None).
-    for bone in armature_obj.data.bones:
-        bone.select = False
+    deselect_all_pose_bones(armature_obj)
 
     arm_mw = armature_obj.matrix_world
     for bname in bone_names:
@@ -361,8 +361,7 @@ def _clear_hair_collision_props(armature_obj, bone_names):
     """Reset Wiggle 2 collision properties on hair bones to defaults."""
     # Deselect all bones so the update callback in update_prop() doesn't
     # try to copy None PointerProperty values to other selected bones.
-    for bone in armature_obj.data.bones:
-        bone.select = False
+    deselect_all_pose_bones(armature_obj)
     for bname in bone_names:
         if not bname:
             continue
@@ -393,6 +392,10 @@ def _cleanup_collision_meshes(collection, objects):
 #  Properties
 # ---------------------------------------------------------------------------
 
+class HairGuideBoneItem(PropertyGroup):
+    bone_name: StringProperty(name="Guide Bone", default="")
+
+
 class HairBoneItem(PropertyGroup):
     bone_name: StringProperty(name="Bone", default="")
     # Which branch this bone belongs to. The physics doesn't care — Wiggle 2
@@ -400,6 +403,20 @@ class HairBoneItem(PropertyGroup):
     # grouping bones by branch in the UI makes it much easier to handle
     # multi-chain hair (back / left / right tails, twin tails, etc).
     branch: IntProperty(name="Branch", default=0, min=0, max=7)
+
+    # Motion guides: Riot-authored bones whose pose this hair bone should
+    # blend toward after the physics bake. Multiple guides are averaged
+    # (slerp-chain). Empty list = pure physics, no guide influence.
+    guide_bones: CollectionProperty(type=HairGuideBoneItem)
+    # Per-bone blend weight (0=pure physics, 1=pure guide). Only used when
+    # HairPhysicsProperties.guide_per_bone is True; otherwise the global
+    # HairPhysicsProperties.guide_weight applies to every bone.
+    guide_weight: FloatProperty(
+        name="Guide Weight",
+        description="How strongly this bone follows its guide bone(s). "
+                    "0 = pure physics, 1 = pure guide",
+        default=0.5, min=0.0, max=1.0,
+    )
 
 
 class HairAnimListItem(PropertyGroup):
@@ -478,6 +495,29 @@ class HairPhysicsProperties(PropertyGroup):
         default="", subtype='DIR_PATH'
     )
 
+    # Motion guide (blend baked physics toward Riot's authored bone poses)
+    guide_enabled: BoolProperty(
+        name="Motion Guide",
+        description="After baking, blend each hair bone's rotation toward one "
+                    "or more guide bones (typically Riot's original hair bones "
+                    "with hand-authored animation). Helps in fast-motion "
+                    "animations where pure physics looks wild",
+        default=False,
+    )
+    guide_weight: FloatProperty(
+        name="Guide Weight",
+        description="Global blend weight between physics and guide pose. "
+                    "0 = pure physics, 1 = pure guide. Ignored when "
+                    "Per-Bone Weight is enabled",
+        default=0.5, min=0.0, max=1.0,
+    )
+    guide_per_bone: BoolProperty(
+        name="Per-Bone Weight",
+        description="When on, each hair bone uses its own guide weight "
+                    "slider instead of the global one",
+        default=False,
+    )
+
     # Body collision
     collision_enabled: BoolProperty(
         name="Body Collision",
@@ -502,6 +542,74 @@ def _get_bone_names(props):
     return [item.bone_name for item in props.bones if item.bone_name.strip()]
 
 
+def _build_guide_map(props, arm):
+    """Resolve per-hair-bone guide mappings from scene props.
+
+    Returns ({hair_name: [guide_name, ...]}, {hair_name: weight}) or
+    ({}, {}) when the guide system is disabled / nothing is mapped.
+    Only includes hair bones whose guides actually exist in the armature.
+    """
+    if not props.guide_enabled:
+        return {}, {}
+    guide_map = {}
+    guide_weights = {}
+    for item in props.bones:
+        hname = item.bone_name.strip()
+        if not hname or hname not in arm.pose.bones:
+            continue
+        guides = [g.bone_name.strip() for g in item.guide_bones]
+        guides = [g for g in guides if g and g in arm.pose.bones]
+        if not guides:
+            continue
+        guide_map[hname] = guides
+        guide_weights[hname] = (
+            item.guide_weight if props.guide_per_bone else props.guide_weight
+        )
+    return guide_map, guide_weights
+
+
+def _apply_guide_blend(context, arm, hname, guide_names, weight):
+    """Blend a hair bone's world rotation toward the averaged guide bones'
+    world rotation at the given weight (0..1).
+
+    World-space rotation blending: a back-spine guide bone and a hair bone
+    hanging from the head live under completely different parent chains,
+    so local rotations are incomparable — only world-space rotation makes
+    "follow this direction" visually meaningful. Position is NOT blended:
+    dragging the hair head toward the guide's head pulls the bone off its
+    parent's tail and produces jittery detachments along the chain.
+
+    Writes via `pb.matrix` so Blender back-solves the local rotation, then
+    runs view_layer.update() so the next hair bone in the chain reads this
+    bone's post-blend parent matrix rather than a stale cached one.
+    """
+    from mathutils import Matrix
+    if weight <= 0.0:
+        return
+    hair_pb = arm.pose.bones.get(hname)
+    if hair_pb is None:
+        return
+    guide_pbs = [arm.pose.bones.get(g) for g in guide_names]
+    guide_pbs = [pb for pb in guide_pbs if pb is not None]
+    if not guide_pbs:
+        return
+
+    # Average guide world rotations via slerp chain.
+    w_guide_rot = guide_pbs[0].matrix.to_quaternion()
+    for i, pb in enumerate(guide_pbs[1:], start=2):
+        w_guide_rot = w_guide_rot.slerp(pb.matrix.to_quaternion(), 1.0 / i)
+
+    cur_mat     = hair_pb.matrix.copy()
+    w_phys_rot  = cur_mat.to_quaternion()
+    w_blend_rot = w_phys_rot.slerp(w_guide_rot, min(1.0, weight))
+
+    # Preserve the bone's head position and scale — only rotation changes.
+    hair_pb.matrix = Matrix.LocRotScale(
+        cur_mat.translation, w_blend_rot, cur_mat.to_scale()
+    )
+    context.view_layer.update()
+
+
 # ---------------------------------------------------------------------------
 #  Bake pipeline
 # ---------------------------------------------------------------------------
@@ -514,6 +622,9 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None,
     and higher solver iterations for chain physics.
     """
     scene = context.scene
+    props = scene.hair_physics
+
+    guide_map, guide_weights = _build_guide_map(props, arm)
 
     if not arm.animation_data or not arm.animation_data.action:
         return False, "No animation loaded"
@@ -535,7 +646,7 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None,
         _apply_wiggle(context, arm, bone_names, eff, hair_type)
 
     select_armature(context, arm)
-    bpy.ops.object.mode_set(mode='POSE')
+    _mode_set(context, arm, 'POSE')
 
     if coll_collection:
         _setup_hair_collision_props(arm, bone_names, coll_collection)
@@ -602,6 +713,8 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None,
         # subsequent bone pose at identity (the "frame 157 → T-pose" bug).
         for f in range(frame_start, frame_end + 1):
             scene.frame_set(f)
+            for hname, gnames in guide_map.items():
+                _apply_guide_blend(context, arm, hname, gnames, guide_weights[hname])
             for pb in physics_pbs:
                 q = tuple(pb.rotation_quaternion)
                 loc = tuple(pb.location)
@@ -617,6 +730,8 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None,
         settle_end = min(frame_start + SETTLE, frame_end)
         for f in range(frame_start, settle_end + 1):
             scene.frame_set(f)
+            for hname, gnames in guide_map.items():
+                _apply_guide_blend(context, arm, hname, gnames, guide_weights[hname])
             for pb in physics_pbs:
                 q = tuple(pb.rotation_quaternion)
                 loc = tuple(pb.location)
@@ -630,15 +745,16 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None,
         scene.wiggle.is_preroll = False
 
         # Phase 2: insert all keyframes at once
+        fcurves = get_action_fcurves(action)
         for bname in bone_names:
-            if not bname:
+            if not bname or fcurves is None:
                 continue
             for prop, count in [('rotation_quaternion', 4), ('location', 3), ('scale', 3)]:
                 dp = f'pose.bones["{bname}"].{prop}'
                 for i in range(count):
-                    fc = action.fcurves.find(dp, index=i)
+                    fc = fcurves.find(dp, index=i)
                     if fc is None:
-                        fc = action.fcurves.new(dp, index=i, action_group=bname)
+                        fc = new_fcurve(fcurves, dp, i, bname)
                     for f in range(frame_start, frame_end + 1):
                         vals = stored.get((bname, f))
                         if vals is None:
@@ -649,7 +765,7 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None,
                             val = vals[1][i]
                         else:
                             val = vals[2][i]
-                        fc.keyframe_points.insert(f, val, options={'FAST', 'REPLACE'})
+                        fc.keyframe_points.insert(f, val, options={'FAST'})
                     fc.update()
     else:
         # --- NON-LOOP: MANUAL FRAME-BY-FRAME BAKE ---
@@ -698,6 +814,8 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None,
         try:
             for f in range(frame_start, frame_end + 1):
                 scene.frame_set(f)
+                for hname, gnames in guide_map.items():
+                    _apply_guide_blend(context, arm, hname, gnames, guide_weights[hname])
                 for pb in physics_pbs:
                     q = tuple(pb.rotation_quaternion)
                     loc = tuple(pb.location)
@@ -718,15 +836,16 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None,
         # Phase 2: insert keyframes. Missing entries (NaN frames, if any)
         # are simply not inserted, leaving Blender to LINEAR-interpolate
         # across the gap from surrounding valid frames.
+        fcurves = get_action_fcurves(action)
         for bname in bone_names:
-            if not bname:
+            if not bname or fcurves is None:
                 continue
             for prop, count in [('rotation_quaternion', 4), ('location', 3), ('scale', 3)]:
                 dp = f'pose.bones["{bname}"].{prop}'
                 for i in range(count):
-                    fc = action.fcurves.find(dp, index=i)
+                    fc = fcurves.find(dp, index=i)
                     if fc is None:
-                        fc = action.fcurves.new(dp, index=i, action_group=bname)
+                        fc = new_fcurve(fcurves, dp, i, bname)
                     for f in range(frame_start, frame_end + 1):
                         vals = stored.get((bname, f))
                         if vals is None:
@@ -737,7 +856,7 @@ def _bake_hair(context, arm, bone_names, intensity, coll_collection=None,
                             val = vals[1][i]
                         else:
                             val = vals[2][i]
-                        fc.keyframe_points.insert(f, val, options={'FAST', 'REPLACE'})
+                        fc.keyframe_points.insert(f, val, options={'FAST'})
                     fc.update()
 
     scene.wiggle.iterations = old_iterations
@@ -871,6 +990,42 @@ class HAIR_OT_RemoveBone(Operator):
         return {'FINISHED'}
 
 
+class HAIR_OT_AddGuideBone(Operator):
+    """Add a guide bone to the hair bone at the given index"""
+    bl_idname  = "hair_physics.add_guide_bone"
+    bl_label   = "Add Guide"
+    bl_options = {'REGISTER'}
+
+    hair_index: IntProperty(default=-1)
+
+    def execute(self, context):
+        props = context.scene.hair_physics
+        if self.hair_index < 0 or self.hair_index >= len(props.bones):
+            return {'CANCELLED'}
+        props.bones[self.hair_index].guide_bones.add()
+        return {'FINISHED'}
+
+
+class HAIR_OT_RemoveGuideBone(Operator):
+    """Remove a guide bone entry from the given hair bone"""
+    bl_idname  = "hair_physics.remove_guide_bone"
+    bl_label   = "Remove Guide"
+    bl_options = {'REGISTER'}
+
+    hair_index:  IntProperty(default=-1)
+    guide_index: IntProperty(default=-1)
+
+    def execute(self, context):
+        props = context.scene.hair_physics
+        if self.hair_index < 0 or self.hair_index >= len(props.bones):
+            return {'CANCELLED'}
+        item = props.bones[self.hair_index]
+        if self.guide_index < 0 or self.guide_index >= len(item.guide_bones):
+            return {'CANCELLED'}
+        item.guide_bones.remove(self.guide_index)
+        return {'FINISHED'}
+
+
 class HAIR_OT_DeleteBranch(Operator):
     """Delete an entire hair branch — all bones in that branch plus the slot"""
     bl_idname  = "hair_physics.delete_branch"
@@ -903,9 +1058,11 @@ class HAIR_OT_DeleteBranch(Operator):
 
 
 class HAIR_OT_Preview(Operator):
-    bl_idname  = "hair_physics.preview"
-    bl_label   = "Preview Hair Jiggle"
-    bl_options = {'REGISTER'}
+    """Bake physics preview onto the currently loaded animation"""
+    bl_idname       = "hair_physics.preview"
+    bl_label        = "Preview Hair Jiggle"
+    bl_description  = "Bake hair physics onto the currently loaded animation"
+    bl_options      = {'REGISTER'}
 
     def execute(self, context):
         props = context.scene.hair_physics
@@ -1169,7 +1326,7 @@ class HAIR_OT_LoadAnimation(Operator):
         context.scene.frame_set(0)
 
         # Reset hair bones to identity (pose-level) before loading.
-        bpy.ops.object.mode_set(mode='POSE')
+        _mode_set(context, armature_obj, 'POSE')
         for bname in hair_bones:
             pb = armature_obj.pose.bones.get(bname)
             if pb:
@@ -1177,7 +1334,7 @@ class HAIR_OT_LoadAnimation(Operator):
                 pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
                 pb.rotation_euler      = (0.0, 0.0, 0.0)
                 pb.scale               = (1.0, 1.0, 1.0)
-        bpy.ops.object.mode_set(mode='OBJECT')
+        _mode_set(context, armature_obj, 'OBJECT')
 
         armature_obj.wiggle_freeze = False
         props.status_text = "Ready"
@@ -1462,11 +1619,40 @@ class HAIR_PT_Physics(Panel):
             # For a single-branch setup, draw a flat list (same UX as before).
             if nb == 1:
                 idx = 0
-                for item in props.bones:
+                for glob_idx, item in enumerate(props.bones):
                     idx += 1
                     box.row(align=True).prop_search(
                         item, "bone_name", arm.pose, "bones", text=f"Bone {idx}"
                     )
+                    if props.guide_enabled:
+                        guide_box = box.box()
+                        guide_box.scale_y = 0.85
+                        header = guide_box.row(align=True)
+                        header.label(text=f"Guides for Bone {idx}:", icon='CON_TRACKTO')
+                        add_op = header.operator(
+                            "hair_physics.add_guide_bone",
+                            text="", icon='ADD',
+                        )
+                        add_op.hair_index = glob_idx
+                        if props.guide_per_bone:
+                            guide_box.prop(item, "guide_weight",
+                                           slider=True, text="Weight")
+                        if len(item.guide_bones) == 0:
+                            guide_box.label(text="(none — pure physics)",
+                                            icon='DOT')
+                        else:
+                            for g_idx, g in enumerate(item.guide_bones):
+                                g_row = guide_box.row(align=True)
+                                g_row.prop_search(
+                                    g, "bone_name", arm.pose, "bones",
+                                    text="",
+                                )
+                                rm_op = g_row.operator(
+                                    "hair_physics.remove_guide_bone",
+                                    text="", icon='X',
+                                )
+                                rm_op.hair_index  = glob_idx
+                                rm_op.guide_index = g_idx
                 row = box.row(align=True)
                 op = row.operator("hair_physics.add_bone",    text="Add Bone", icon='ADD')
                 op.branch = 0
@@ -1493,11 +1679,40 @@ class HAIR_PT_Physics(Panel):
                     if not branch_bones:
                         sub.label(text="(no bones yet)", icon='INFO')
                     else:
-                        for count, (_, item) in enumerate(branch_bones, start=1):
+                        for count, (glob_idx, item) in enumerate(branch_bones, start=1):
                             sub.row(align=True).prop_search(
                                 item, "bone_name", arm.pose, "bones",
                                 text=f"Bone {count}"
                             )
+                            if props.guide_enabled:
+                                guide_box = sub.box()
+                                guide_box.scale_y = 0.85
+                                header = guide_box.row(align=True)
+                                header.label(text=f"Guides for Bone {count}:", icon='CON_TRACKTO')
+                                add_op = header.operator(
+                                    "hair_physics.add_guide_bone",
+                                    text="", icon='ADD',
+                                )
+                                add_op.hair_index = glob_idx
+                                if props.guide_per_bone:
+                                    guide_box.prop(item, "guide_weight",
+                                                   slider=True, text="Weight")
+                                if len(item.guide_bones) == 0:
+                                    guide_box.label(text="(none — pure physics)",
+                                                    icon='DOT')
+                                else:
+                                    for g_idx, g in enumerate(item.guide_bones):
+                                        g_row = guide_box.row(align=True)
+                                        g_row.prop_search(
+                                            g, "bone_name", arm.pose, "bones",
+                                            text="",
+                                        )
+                                        rm_op = g_row.operator(
+                                            "hair_physics.remove_guide_bone",
+                                            text="", icon='X',
+                                        )
+                                        rm_op.hair_index  = glob_idx
+                                        rm_op.guide_index = g_idx
                     row = sub.row(align=True)
                     op = row.operator("hair_physics.add_bone",
                                       text="Add Bone", icon='ADD')
@@ -1524,6 +1739,23 @@ class HAIR_PT_Physics(Panel):
             else "▸ Flowing" if i <= 17 else "▸ Wild!"
         row.label(text=label)
 
+        # --- Motion guide ---
+        box = layout.box()
+        box.row().prop(props, "guide_enabled", text="Motion Guide", icon='CON_TRACKTO')
+        if props.guide_enabled:
+            col = box.column(align=True)
+            col.label(
+                text="Blend baked physics toward authored guide bones.",
+                icon='INFO',
+            )
+            col.prop(props, "guide_per_bone", text="Per-Bone Weight")
+            if not props.guide_per_bone:
+                col.prop(props, "guide_weight", slider=True, text="Weight")
+            col.label(
+                text="Pick guides next to each hair bone above.",
+                icon='DOT',
+            )
+
         # --- Body collision ---
         box = layout.box()
         box.row().prop(props, "collision_enabled", text="Body Collision", icon='MESH_UVSPHERE')
@@ -1539,6 +1771,7 @@ class HAIR_PT_Physics(Panel):
             col.prop(props, "collision_sphere_factor", slider=True, text="Radius Scale  (1.0 = auto)")
 
         # --- Preview ---
+        has_arm   = bool(arm)
         has_anim  = bool(arm and arm.animation_data and arm.animation_data.action)
         has_bones = bool(_get_bone_names(props))
 
@@ -1549,6 +1782,12 @@ class HAIR_PT_Physics(Panel):
         row = col.row(align=True)
         row.enabled = has_anim and has_bones
         row.operator("hair_physics.preview", text="Preview Hair Jiggle", icon='MOD_WAVE')
+        if not has_arm:
+            col.label(text="Select or import an armature first", icon='ERROR')
+        elif not has_anim:
+            col.label(text="Load an animation first", icon='ERROR')
+        elif not has_bones:
+            col.label(text="Add at least one hair bone", icon='ERROR')
         row = col.row(align=True)
         row.operator("hair_physics.undo", text="Undo Preview", icon='LOOP_BACK')
         if props.current_loaded:
@@ -1613,6 +1852,7 @@ class HAIR_PT_Physics(Panel):
 # ---------------------------------------------------------------------------
 
 classes = [
+    HairGuideBoneItem,
     HairBoneItem,
     HairAnimListItem,
     HairPhysicsProperties,
@@ -1620,6 +1860,8 @@ classes = [
     HAIR_OT_SelectAllCollisionBones,
     HAIR_OT_AddBone,
     HAIR_OT_RemoveBone,
+    HAIR_OT_AddGuideBone,
+    HAIR_OT_RemoveGuideBone,
     HAIR_OT_DeleteBranch,
     HAIR_OT_Preview,
     HAIR_OT_Undo,

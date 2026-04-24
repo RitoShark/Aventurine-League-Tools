@@ -16,6 +16,8 @@ Design:
 
 import math
 
+from .physics_common import get_action_fcurves
+
 
 # ---------------------------------------------------------------------------
 #  Helpers
@@ -59,7 +61,7 @@ def _detect_animation_loops(action, frame_start, frame_end):
     ends = {}
     found = False
 
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         dp = fc.data_path
         if 'pose.bones["' not in dp:
             continue
@@ -107,7 +109,7 @@ def _detect_animation_loops(action, frame_start, frame_end):
 def _set_linear_interpolation(action, bone_names):
     """Set all physics bone keyframes to LINEAR interp, CONSTANT extrap."""
     bone_set = set(b for b in bone_names if b)
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         if 'pose.bones["' not in fc.data_path:
             continue
         if _parse_bone_name(fc.data_path) not in bone_set:
@@ -137,7 +139,7 @@ def _fix_quaternion_continuity(action, bone_names):
 
     # Group quat fcurves: {data_path: {0:fc, 1:fc, 2:fc, 3:fc}}
     groups = {}
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         dp = fc.data_path
         if 'rotation_quaternion' not in dp or 'pose.bones["' not in dp:
             continue
@@ -204,7 +206,7 @@ def _copy_loop_end_to_start(action, frame_start, frame_end, bone_names):
     while keeping the last frame's correct physics intact.
     """
     bone_set = set(b for b in bone_names if b)
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         if 'pose.bones["' not in fc.data_path:
             continue
         if _parse_bone_name(fc.data_path) not in bone_set:
@@ -236,7 +238,7 @@ def _snap_loop_seam(action, frame_start, frame_end, bone_names):
     quat_groups = {}
     other_fcs = []
 
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         if 'pose.bones["' not in fc.data_path:
             continue
         if _parse_bone_name(fc.data_path) not in bone_set:
@@ -323,7 +325,7 @@ def _force_loop_perfect_match(action, frame_start, frame_end, bone_names):
 
     quat_groups = {}
     other_fcs = []
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         if 'pose.bones["' not in fc.data_path:
             continue
         if _parse_bone_name(fc.data_path) not in bone_set:
@@ -408,7 +410,7 @@ _velocity_match_loop = _force_loop_perfect_match
 def _clean_tpose_keyframes(action, bone_names):
     """Force frame 0 to identity pose (LoL bind/T-pose frame)."""
     bone_set = set(b for b in bone_names if b)
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         dp = fc.data_path
         if 'pose.bones["' not in dp:
             continue
@@ -442,7 +444,7 @@ def _clean_tpose_keyframes(action, bone_names):
 def _restore_nonloop_start_to_tpose(action, frame_start, bone_names):
     """Non-loop: set frame_start to identity (physics starts from rest)."""
     bone_set = set(b for b in bone_names if b)
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         dp = fc.data_path
         if 'pose.bones["' not in dp:
             continue
@@ -463,8 +465,9 @@ def _restore_nonloop_start_to_tpose(action, frame_start, bone_names):
         else:
             continue
 
-        kp = fc.keyframe_points.insert(frame_start, val, options={'FAST', 'REPLACE'})
-        kp.interpolation = 'LINEAR'
+        kp = fc.keyframe_points.insert(frame_start, val, options={'FAST'})
+        if kp is not None:
+            kp.interpolation = 'LINEAR'
         fc.update()
 
 
@@ -472,7 +475,7 @@ def _smooth_boundary_frames(action, frame_start, frame_end, bone_names,
                              smooth_range=3, smooth_ends='both'):
     """Blend boundary frames toward the anchor for smooth ease-in/out."""
     bone_set = set(b for b in bone_names if b)
-    for fc in action.fcurves:
+    for fc in (get_action_fcurves(action) or []):
         if 'pose.bones["' not in fc.data_path:
             continue
         if _parse_bone_name(fc.data_path) not in bone_set:

@@ -17,7 +17,8 @@ from ..io import export_anm
 from .physics_common import (
     lerp, lerp_exp,
     find_armature, get_animations_folder,
-    ensure_object_mode, select_armature,
+    ensure_object_mode, select_armature, _mode_set, deselect_all_pose_bones,
+    get_action_fcurves, new_fcurve,
     configure_wiggle_bones, clear_wiggle_from_bones, strip_physics_keyframes,
     find_default_collision_bones, post_bake_collision_correct,
     precompute_collision_radii, hide_meshes_for_batch, restore_meshes_after_batch,
@@ -247,8 +248,7 @@ def _setup_boobs_collision(armature_obj, bone_names, coll_collection):
     bone against the surface. Bounce is modest so collisions don't over-push.
     """
     # Deselect all bones to avoid PointerProperty copy-to-selected issues.
-    for bone in armature_obj.data.bones:
-        bone.select = False
+    deselect_all_pose_bones(armature_obj)
 
     arm_mw = armature_obj.matrix_world
     for bname in bone_names:
@@ -312,7 +312,7 @@ def bake_wiggle_for_current_action(context, armature_obj, bone_names, intensity,
         apply_wiggle_to_bones(context, armature_obj, bone_names, effective_intensity)
 
     select_armature(context, armature_obj)
-    bpy.ops.object.mode_set(mode='POSE')
+    _mode_set(context, armature_obj, 'POSE')
 
     # Wire real-time collision: must happen AFTER apply_wiggle_to_bones
     # (which clobbers per-bone collider props) and BEFORE the bake loop.
@@ -443,15 +443,16 @@ def bake_wiggle_for_current_action(context, armature_obj, bone_names, intensity,
         scene.wiggle.is_preroll = False
 
         # Phase 2: insert all keyframes at once
+        fcurves = get_action_fcurves(action)
         for bname in bone_names:
-            if not bname:
+            if not bname or fcurves is None:
                 continue
             for prop, count in [('rotation_quaternion', 4), ('location', 3), ('scale', 3)]:
                 dp = f'pose.bones["{bname}"].{prop}'
                 for i in range(count):
-                    fc = action.fcurves.find(dp, index=i)
+                    fc = fcurves.find(dp, index=i)
                     if fc is None:
-                        fc = action.fcurves.new(dp, index=i, action_group=bname)
+                        fc = new_fcurve(fcurves, dp, i, bname)
                     for f in range(frame_start, frame_end + 1):
                         vals = stored.get((bname, f))
                         if vals is None:
@@ -462,7 +463,7 @@ def bake_wiggle_for_current_action(context, armature_obj, bone_names, intensity,
                             val = vals[1][i]
                         else:
                             val = vals[2][i]
-                        fc.keyframe_points.insert(f, val, options={'FAST', 'REPLACE'})
+                        fc.keyframe_points.insert(f, val, options={'FAST'})
                     fc.update()
     else:
         # Non-loop: just reset and bake, physics starts from rest
@@ -885,7 +886,7 @@ class BOOBS_OT_LoadAnimation(Operator):
         context.scene.frame_set(0)
 
         # Reset breast bones to identity (pose-level) before loading.
-        bpy.ops.object.mode_set(mode='POSE')
+        _mode_set(context, armature_obj, 'POSE')
         for bname in breast_bones:
             pb = armature_obj.pose.bones.get(bname)
             if pb:
@@ -893,7 +894,7 @@ class BOOBS_OT_LoadAnimation(Operator):
                 pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
                 pb.rotation_euler      = (0.0, 0.0, 0.0)
                 pb.scale               = (1.0, 1.0, 1.0)
-        bpy.ops.object.mode_set(mode='OBJECT')
+        _mode_set(context, armature_obj, 'OBJECT')
 
         armature_obj.wiggle_freeze = False
 

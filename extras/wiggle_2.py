@@ -663,10 +663,13 @@ class WiggleSelect(bpy.types.Operator):
                 if not b:
                     rebuild = True
                     continue
-                b.bone.select = True
+                if bpy.app.version >= (5, 0, 0):
+                    b.select = True
+                else:
+                    b.bone.select = True
         if rebuild: build_list()
         return {'FINISHED'}
-    
+
 class WiggleBake(bpy.types.Operator):
     """Bake this object's visible wiggle bones to keyframes"""
     bl_idname = "wiggle.bake"
