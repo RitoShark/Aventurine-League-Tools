@@ -49,13 +49,14 @@ class LOL_PT_MainPanel(Panel):
         row.operator("import_scene.scb", text="Import", icon='IMPORT')
         row.operator("export_scene.scb", text="Export", icon='EXPORT')
         
-        # SCO section
+        # MAPGEO section (SCO moved out of the N menu — riot phased SCO out;
+        # it stays available under File > Import/Export)
         box = layout.box()
-        box.label(text="SCO (Static Objects with Pivot)", icon='BONE_DATA')
+        box.label(text="MAPGEO (Map Geometry)", icon='WORLD')
         row = box.row(align=True)
         row.scale_y = 1.2
-        row.operator("import_scene.sco", text="Import", icon='IMPORT')
-        row.operator("export_scene.sco", text="Export", icon='EXPORT')
+        row.operator("import_scene.mapgeo", text="Import", icon='IMPORT')
+        row.operator("export_scene.mapgeo", text="Export", icon='EXPORT')
         
         # Mesh Tools section
         box = layout.box()
@@ -114,6 +115,14 @@ class LOL_PT_MainPanel(Panel):
             box.label(text="✓ Bind pose saved", icon='CHECKMARK')
         else:
             box.label(text="No bind pose set", icon='INFO')
+
+        # Offset Bones section (Shift+D clone workflow)
+        box = layout.box()
+        box.label(text="Offset Bones", icon='CON_LOCLIKE')
+        row = box.row(align=True)
+        row.scale_y = 1.2
+        row.enabled = in_pose_mode
+        row.operator("lol_offset.set_from_pose", text="Set Offset from Pose", icon='ORIENTATION_LOCAL')
 
         
         # Show metadata if armature is selected

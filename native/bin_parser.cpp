@@ -206,6 +206,140 @@ static std::string extract_textures(const ritobin::Bin& bin) {
     return oss.str();
 }
 
+// ---------------------------------------------------------------------------
+// materials.bin extraction (map geometry): StaticMaterialDef entries -> JSON
+// ---------------------------------------------------------------------------
+
+// Field hashes (FNV-1a of lowercased names, verified against ritobin::FNV1a):
+static const uint32_t HASH_STATIC_MATERIAL_DEF = 0xff9d3409; // "StaticMaterialDef"
+static const uint32_t HASH_NAME = 0x8d39bde6;                // "name"
+// samplerValues item fields: textureName = sampler semantic ("Diffuse_Texture"),
+// texturePath = asset path. samplerName is the legacy semantic field.
+static const uint32_t HASH_SAMPLER_NAME = 0x02e7fb4c;        // "samplerName"
+// HASH_PROP_NAME (0xb311d4ef) is "textureName", HASH_PROP_VALUE (0xf0a363e3)
+// is "texturePath" — reused from the skin extractor above.
+
+static void json_escape(std::ostringstream& oss, const std::string& s) {
+    for (char c : s) {
+        switch (c) {
+            case '"': oss << "\\\""; break;
+            case '\\': oss << "\\\\"; break;
+            case '\n': oss << "\\n"; break;
+            case '\r': oss << "\\r"; break;
+            case '\t': oss << "\\t"; break;
+            default:
+                if ((unsigned char)c < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    oss << buf;
+                } else {
+                    oss << c;
+                }
+        }
+    }
+}
+
+static std::string extract_materials(const ritobin::Bin& bin) {
+    std::ostringstream oss;
+    oss << "{\"materials\":[";
+    bool first_mat = true;
+
+    auto entries_it = bin.sections.find("entries");
+    if (entries_it == bin.sections.end()) return "{\"materials\":[]}";
+    const auto* entries_map = std::get_if<ritobin::Map>(&entries_it->second);
+    if (!entries_map) return "{\"materials\":[]}";
+
+    for (const auto& pair : entries_map->items) {
+        const auto* entry = get_embed(pair.value);
+        if (!entry || entry->name.hash() != HASH_STATIC_MATERIAL_DEF) continue;
+
+        uint32_t key_hash = 0;
+        if (auto* key = std::get_if<ritobin::Hash>(&pair.key)) {
+            key_hash = key->value.hash();
+        }
+
+        std::string mat_name;
+        if (auto* name_field = find_field(*entry, HASH_NAME)) {
+            mat_name = get_string(name_field->value);
+        }
+
+        if (!first_mat) oss << ",";
+        first_mat = false;
+        char keybuf[16];
+        snprintf(keybuf, sizeof(keybuf), "%08x", key_hash);
+        oss << "{\"key\":\"" << keybuf << "\",\"name\":\"";
+        json_escape(oss, mat_name);
+        oss << "\",\"samplers\":[";
+
+        bool first_sampler = true;
+        if (auto* sv_field = find_field(*entry, HASH_SAMPLER_VALUES)) {
+            auto emit_sampler = [&](const ritobin::Value& item_val) {
+                const auto* sampler = get_embed(item_val);
+                if (!sampler) return;
+
+                std::string sem, path;
+                if (auto* f = find_field(*sampler, HASH_PROP_NAME)) {       // textureName
+                    sem = get_string(f->value);
+                }
+                if (sem.empty()) {
+                    if (auto* f = find_field(*sampler, HASH_SAMPLER_NAME)) { // legacy
+                        sem = get_string(f->value);
+                    }
+                }
+                if (auto* f = find_field(*sampler, HASH_PROP_VALUE)) {      // texturePath
+                    path = get_string(f->value);
+                }
+                if (path.empty()) return;
+
+                if (!first_sampler) oss << ",";
+                first_sampler = false;
+                oss << "{\"name\":\"";
+                json_escape(oss, sem);
+                oss << "\",\"texture\":\"";
+                json_escape(oss, path);
+                oss << "\"}";
+            };
+
+            if (auto* lst = get_list(sv_field->value)) {
+                for (const auto& item : lst->items) emit_sampler(item.value);
+            } else if (auto* lst2 = get_list2(sv_field->value)) {
+                for (const auto& item : lst2->items) emit_sampler(item.value);
+            }
+        }
+        oss << "]}";
+    }
+
+    oss << "]}";
+    return oss.str();
+}
+
+DLL_EXPORT int parse_materials_bin(const char* bin_path, uint8_t** out_data, uint32_t* out_size) {
+    std::ifstream file(bin_path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return -1;
+
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    std::vector<char> buffer(size);
+    if (!file.read(buffer.data(), size)) return -1;
+    file.close();
+
+    ritobin::Bin bin;
+    std::string error = ritobin::io::read_binary(bin, buffer, &ritobin::io::g_compat_default);
+    if (!error.empty()) return -2;
+
+    std::string result = extract_materials(bin);
+
+    uint32_t result_size = (uint32_t)result.size();
+    uint8_t* result_data = (uint8_t*)malloc(result_size + 1);
+    if (!result_data) return -4;
+
+    memcpy(result_data, result.c_str(), result_size + 1);
+    *out_data = result_data;
+    *out_size = result_size;
+    return 0;
+}
+
 DLL_EXPORT int parse_bin_textures(const char* bin_path, uint8_t** out_data, uint32_t* out_size) {
     std::ifstream file(bin_path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) return -1;
@@ -238,7 +372,7 @@ DLL_EXPORT void free_bin_result(uint8_t* data) {
 }
 
 DLL_EXPORT const char* get_bin_parser_version() {
-    return "bin_parser 1.1";
+    return "bin_parser 1.2";
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved) {

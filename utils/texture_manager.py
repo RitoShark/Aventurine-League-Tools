@@ -131,6 +131,44 @@ def _native_parse_bin_textures(bin_path):
         print(f"Aventurine: Native BIN parsing error: {e}")
         return None
 
+def parse_materials_bin(bin_path):
+    """Parse a map materials.bin via the native DLL. Returns the parsed JSON dict
+    ({'materials': [{'key', 'name', 'samplers': [{'name', 'texture'}]}]}) or None
+    when the DLL is missing or predates the parse_materials_bin entry point."""
+    if not _load_bin_dll():
+        return None
+
+    try:
+        fn = _bin_dll.parse_materials_bin
+    except AttributeError:
+        # DLL on disk is older than bin_parser 1.2 — rebuild native/bin_parser.dll
+        return None
+
+    try:
+        fn.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)), ctypes.POINTER(ctypes.c_uint32)]
+        fn.restype = ctypes.c_int
+
+        out_data = ctypes.POINTER(ctypes.c_uint8)()
+        out_size = ctypes.c_uint32()
+        result = fn(bin_path.encode('utf-8'), ctypes.byref(out_data), ctypes.byref(out_size))
+        if result != 0:
+            return None
+
+        size = out_size.value
+        if size == 0:
+            _bin_free(out_data)
+            return {'materials': []}
+
+        result_bytes = bytes(ctypes.cast(out_data, ctypes.POINTER(ctypes.c_uint8 * size)).contents)
+        _bin_free(out_data)
+
+        import json
+        return json.loads(result_bytes.decode('utf-8'))
+    except Exception as e:
+        print(f"Aventurine: materials.bin parsing error: {e}")
+        return None
+
+
 def _detect_skin_folder_name(skn_path):
     """
     Detect the skin folder name from the SKN path.

@@ -5,6 +5,7 @@ import os
 import re
 from ..utils.binary_utils import BinaryStream
 from . import import_skl
+from . import bone_utils
 
 def clean_blender_name(name):
     """Remove Blender's .001, .002 etc. suffixes from names"""
@@ -60,14 +61,18 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
     world_to_armature = armature_obj.matrix_world.inverted() @ mesh_obj.matrix_world
     scale = 1.0 if disable_scaling else import_skl.EXPORT_SCALE
 
-    # Map vertex groups to SKL bone indices
+    # Map vertex groups to SKL bone indices.
+    # Exact name match takes priority — weights painted on "X.001" must reach
+    # bone "X.001" when it exists, not leak onto native "X".  Cleaning strips
+    # numeric suffixes only (.001), never at the first dot (Hand.L stays Hand.L).
     group_to_bone_idx = {}
     for group in mesh_obj.vertex_groups:
-        clean_name = group.name.split('.')[0] if '.' in group.name else group.name
-        if clean_name in bone_to_idx:
-            group_to_bone_idx[group.index] = bone_to_idx[clean_name]
-        elif group.name in bone_to_idx:
+        if group.name in bone_to_idx:
             group_to_bone_idx[group.index] = bone_to_idx[group.name]
+        else:
+            clean_name = bone_utils.clean_export_bone_name(group.name)
+            if clean_name in bone_to_idx:
+                group_to_bone_idx[group.index] = bone_to_idx[clean_name]
 
     # Get UV data
     if not mesh.uv_layers.active:
@@ -199,8 +204,6 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
 def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disable_scaling=False, disable_transforms=False, use_visual_pose=False):
     """Write multiple Blender meshes to a single SKN file with multiple submeshes"""
 
-    print("\n=== SKN EXPORT DEBUG ===")
-
     if not armature_obj:
         raise Exception("No armature found")
 
@@ -220,10 +223,13 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
     bone_to_idx = {}
     for i, bone in enumerate(bone_list):
         bone_to_idx[bone.name] = i
-        if clean_names:
-            # Also map cleaned name to same index for vertex group lookup
-            cleaned = clean_blender_name(bone.name)
-            if cleaned != bone.name:
+    if clean_names:
+        for i, bone in enumerate(bone_list):
+            # Also map cleaned name to same index for vertex group lookup.
+            # Never overwrite an exact bone name: the alias of "X.001" must not
+            # hijack groups that target the real bone "X".
+            cleaned = bone_utils.clean_export_bone_name(bone.name)
+            if cleaned != bone.name and cleaned not in bone_to_idx:
                 bone_to_idx[cleaned] = i
 
     # If use_visual_pose, evaluate meshes at frame 0 with armature deformation
@@ -255,10 +261,6 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
 
         mesh = mesh_obj.data
         deformed_pos, deformed_norms = deformed_data.get(mesh_obj.name, (None, None))
-        print(f"Processing mesh: '{mesh_obj.name}' with {len(mesh.materials)} material slots")
-        for i, mat in enumerate(mesh.materials):
-            mat_name = mat.name if mat else "(None)"
-            print(f"  Slot {i}: '{mat_name}'")
 
         # Check for shared vertices between materials
         shared_mats = check_shared_vertices_between_materials(mesh_obj)
@@ -303,7 +305,6 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
                     'indices': [idx + total_vertex_count for idx in data['indices']]
                 }
 
-                print(f"  Submesh: '{submesh_info['name']}' | verts: {submesh_info['vertex_count']} (start: {submesh_info['vertex_start']}) | indices: {submesh_info['index_count']} (start: {submesh_info['index_start']})")
                 submesh_data.append(submesh_info)
                 total_vertex_count += len(data['vertices'])
                 total_index_count += len(data['indices'])
@@ -335,13 +336,9 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
                 'indices': [idx + total_vertex_count for idx in data['indices']]
             }
 
-            print(f"  Submesh: '{submesh_info['name']}' | verts: {submesh_info['vertex_count']} (start: {submesh_info['vertex_start']}) | indices: {submesh_info['index_count']} (start: {submesh_info['index_start']})")
             submesh_data.append(submesh_info)
             total_vertex_count += len(data['vertices'])
             total_index_count += len(data['indices'])
-
-    print(f"Total: {len(submesh_data)} submeshes, {total_vertex_count} vertices, {total_index_count} indices")
-    print("=== END DEBUG ===\n")
 
     if not submesh_data:
         raise Exception("No geometry found to export")
@@ -352,7 +349,16 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
     
     if len(submesh_data) > 32:
         raise Exception(f"Too many submeshes/materials: {len(submesh_data)}, max allowed: 32. Reduce number of materials.")
-    
+
+    # Vertex bone indices are stored as uint8 — weights may only reference the
+    # first 256 bones. Large external rigs exceed this silently otherwise.
+    max_inf = max((i for sm in submesh_data for v in sm['vertices'] for i in v['inf']), default=0)
+    if max_inf > 255:
+        raise Exception(
+            f"SKN format supports at most 256 weighted bones: vertex weights reference "
+            f"bone index {max_inf}. Reduce the skeleton or remove weights on high-index bones."
+        )
+
     # Write to file
     with open(filepath, 'wb') as f:
         bs = BinaryStream(f)
@@ -390,8 +396,6 @@ def fix_custom_bone_parenting(armature_obj):
     """
     import re
 
-    print(f"\n=== fix_custom_bone_parenting on '{armature_obj.name}' ===")
-
     reparent_ops = []
     intended_parent = {}
 
@@ -401,11 +405,39 @@ def fix_custom_bone_parenting(armature_obj):
         pb = armature_obj.pose.bones.get(name)
         return pb.parent.name if (pb and pb.parent) else ""
 
+    # Option C: Shift+D duplicates of native bones.  Blender copies the
+    # pose-bone custom props on duplication, so these SHARE native_bone_index
+    # with the original and are invisible to Options A/B below (which only
+    # process prop-less bones).  Splice each duplicate between the original
+    # bone and its current parent: the duplicate becomes an "offset holder"
+    # whose authored placement shifts the subtree in every stock animation
+    # (export_skl writes its bind as the authored delta, export_anm keeps it
+    # trackless).
+    offset_clones = bone_utils.detect_offset_clones(armature_obj)
+    spliced_targets = set()
+    for clone_name in sorted(offset_clones):
+        target_name = offset_clones[clone_name]
+        clone_pb = armature_obj.pose.bones.get(clone_name)
+        target_pb = armature_obj.pose.bones.get(target_name)
+        if clone_pb is None or target_pb is None:
+            continue
+        if clone_pb.get("native_bone_index") is None:
+            continue  # prop-less name-matched duplicates are handled by Option B
+        if target_name in spliced_targets:
+            continue  # extra duplicates of the same bone are left as-is
+        spliced_targets.add(target_name)
+        target_parent = current_or_intended_parent(target_name)
+        if target_parent == clone_name:
+            continue  # already spliced
+        clone_parent = clone_pb.parent.name if clone_pb.parent else ""
+        if clone_parent != target_parent:
+            reparent_ops.append((clone_name, target_parent))
+            intended_parent[clone_name] = target_parent
+        reparent_ops.append((target_name, clone_name))
+        intended_parent[target_name] = clone_name
+
     for pb in armature_obj.pose.bones:
         idx = pb.get("native_bone_index")
-        p = pb.parent.name if pb.parent else "ROOT"
-        print(f"  {pb.name}: idx={idx!r}  parent={p}")
-
         if idx is not None:
             continue  # native bone
 
@@ -415,59 +447,46 @@ def fix_custom_bone_parenting(armature_obj):
         if native_children:
             np_names = [c.get("native_parent", "") for c in native_children
                         if c.get("native_parent")]
-            print(f"    OptionA: native_children={[c.name for c in native_children]} np={np_names}")
             if not np_names:
                 continue
             correct_parent = np_names[0]
             if correct_parent not in armature_obj.pose.bones:
-                print(f"    correct_parent '{correct_parent}' not in armature — skip")
                 continue
             current_parent = pb.parent.name if pb.parent else ""
             if current_parent != correct_parent:
-                print(f"    QUEUE {pb.name!r} -> {correct_parent!r}")
                 reparent_ops.append((pb.name, correct_parent))
                 intended_parent[pb.name] = correct_parent
             continue
 
         # Option B: floating custom bone — use name suffix
         base_name = re.sub(r'\.\d+$', '', pb.name)
-        print(f"    OptionB: base_name={base_name!r}")
         if base_name == pb.name:
-            print(f"    no suffix — skip")
             continue
 
         native_match = armature_obj.pose.bones.get(base_name)
         if native_match is None or native_match.get("native_bone_index") is None:
-            print(f"    no native match for '{base_name}' — skip")
             continue
 
         native_current_parent = current_or_intended_parent(native_match.name)
-        print(f"    native_match={native_match.name!r} native_current_parent={native_current_parent!r}")
 
         if native_current_parent != pb.name:
             current_pb_parent = pb.parent.name if pb.parent else ""
             if current_pb_parent != native_current_parent:
                 if not native_current_parent or native_current_parent in armature_obj.pose.bones:
-                    print(f"    QUEUE {pb.name!r} -> {native_current_parent!r}")
                     reparent_ops.append((pb.name, native_current_parent))
                     intended_parent[pb.name] = native_current_parent
 
         actual_native_parent = native_match.parent.name if native_match.parent else ""
         if actual_native_parent != pb.name:
-            print(f"    QUEUE {native_match.name!r} -> {pb.name!r}")
             reparent_ops.append((native_match.name, pb.name))
             intended_parent[native_match.name] = pb.name
 
-    print(f"  reparent_ops={reparent_ops}")
-
     if not reparent_ops:
-        print("  Nothing to fix.")
         return reparent_ops
 
     # Apply in Edit Mode
     prev_active = bpy.context.view_layer.objects.active
     bpy.context.view_layer.objects.active = armature_obj
-    print(f"  context.mode={bpy.context.mode!r}")
 
     if bpy.context.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
@@ -480,15 +499,12 @@ def fix_custom_bone_parenting(armature_obj):
             continue
         if parent_name and parent_name in eb:
             eb[bone_name].parent = eb[parent_name]
-            print(f"  APPLIED {bone_name!r}.parent = {parent_name!r}")
         else:
             eb[bone_name].parent = None
-            print(f"  APPLIED {bone_name!r}.parent = None")
         eb[bone_name].use_connect = False
 
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.context.view_layer.objects.active = prev_active
-    print("=== done ===\n")
 
     return reparent_ops
 
@@ -521,9 +537,6 @@ def process_animations_visual(operator, context, skn_filepath, armature_obj, dis
     skn_dir  = os.path.dirname(os.path.abspath(skn_filepath))
     anim_dir = os.path.join(skn_dir, "animations")
 
-    print(f"\n[process_animations_visual] skn_dir  = {skn_dir}")
-    print(f"[process_animations_visual] anim_dir = {anim_dir}  exists={os.path.isdir(anim_dir)}")
-
     if not os.path.isdir(anim_dir):
         operator.report({'ERROR'}, f"No 'animations' folder found next to SKN at: {skn_dir}")
         return False
@@ -532,8 +545,6 @@ def process_animations_visual(operator, context, skn_filepath, armature_obj, dis
     if not anm_files:
         operator.report({'ERROR'}, "No ANM files found in 'animations' folder")
         return False
-
-    print(f"[process_animations_visual] found {len(anm_files)} ANM(s)")
 
     # --- Back up originals (first time only) ---
     backup_dir = os.path.join(skn_dir, "Unmodified_anm_backup")
@@ -581,17 +592,6 @@ def process_animations_visual(operator, context, skn_filepath, armature_obj, dis
                     _seen_idx[_idx] = (_has_sfx, _pb.name)
                     native_bone_names.add(_pb.name)
 
-    print(f"[visual_anm] native_bone_names count: {len(native_bone_names)}")
-
-    # Dump each bone's parent relationship so we can see what's detected
-    for _pb in armature_obj.pose.bones:
-        _is_nat = _pb.name in native_bone_names
-        _par = _pb.parent.name if _pb.parent else "None"
-        _par_nat = _pb.parent.name in native_bone_names if _pb.parent else True
-        _idx_val = _pb.get("native_bone_index")
-        if not _par_nat and _is_nat:
-            print(f"[visual_anm] IS_CUSTOM_PARENT candidate: {_pb.name!r}  parent={_par!r}  idx={_idx_val}")
-
     # ── Find is_custom_parent bones and pre-compute their adjustments ────────
     is_custom_parent_adjust: dict = {}
 
@@ -617,10 +617,6 @@ def process_animations_visual(operator, context, skn_filepath, armature_obj, dis
         _M_anc = _get_stored_ml(_native_anc)
         _M_int = _get_stored_ml(_intermediate)
 
-        print(f"[visual_anm] {_pb.name!r}: native_anc={_native_anc.name!r}  intermediate={_intermediate.name!r}")
-        print(f"[visual_anm]   M_anc t=({_M_anc[0][3]:.5f},{_M_anc[1][3]:.5f},{_M_anc[2][3]:.5f})")
-        print(f"[visual_anm]   M_int t=({_M_int[0][3]:.5f},{_M_int[1][3]:.5f},{_M_int[2][3]:.5f})")
-
         try:
             _b_local = _M_anc.inverted() @ _M_int
         except ValueError:
@@ -628,8 +624,6 @@ def process_animations_visual(operator, context, skn_filepath, armature_obj, dis
             continue
 
         _l_int_bind_L = P_inv @ _b_local @ P
-        _t_int, _r_int, _s_int = _l_int_bind_L.decompose()
-        print(f"[visual_anm]   l_int_bind_L: t=({_t_int.x:.5f},{_t_int.y:.5f},{_t_int.z:.5f})  r=({_r_int.w:.4f},{_r_int.x:.4f},{_r_int.y:.4f},{_r_int.z:.4f})")
 
         try:
             _l_int_bind_L_inv = _l_int_bind_L.inverted()
@@ -639,23 +633,6 @@ def process_animations_visual(operator, context, skn_filepath, armature_obj, dis
 
         _h = import_anm.Hash.elf(_pb.name)
         is_custom_parent_adjust[_h] = (_l_int_bind_L_inv, _l_int_bind_L, _intermediate.name, _pb.name)
-        print(f"[visual_anm] -> hash={_h:#010x}  registered for adjustment")
-
-        # ── CONSISTENCY CHECK: does our l_int_bind_L match what export_skl writes? ──
-        # export_skl with use_visual_pose=False uses bone.matrix_local (rest pose, armature-local).
-        # We use _get_stored_ml which should give the same values if rest pose hasn't changed.
-        _skl_b_local = _native_anc.bone.matrix_local.inverted() @ _intermediate.bone.matrix_local
-        _l_skl_int = P_inv @ _skl_b_local @ P
-        _, _r_skl, _ = _l_skl_int.decompose()
-        _angle_diff = (_r_int.rotation_difference(_r_skl)).angle
-        print(f"[visual_anm]   SKL rest-pose l_001: r=({_r_skl.w:.4f},{_r_skl.x:.4f},{_r_skl.y:.4f},{_r_skl.z:.4f})")
-        if _angle_diff > 0.01:
-            print(f"[visual_anm]   WARNING: l_int_bind_L vs SKL rest differ by {_angle_diff*57.3:.2f}° — "
-                  f"stored native_matrix_local may be stale (use_visual_pose=True path uses frame-0 matrices)")
-        else:
-            print(f"[visual_anm]   OK: l_int_bind_L matches SKL rest-pose (diff={_angle_diff*57.3:.3f}°)")
-
-    print(f"[visual_anm] is_custom_parent_adjust has {len(is_custom_parent_adjust)} entries: {[hex(h) for h in is_custom_parent_adjust]}")
 
     # ── Process each ANM directly (no Blender FK chain) ─────────────────────
     processed = 0
@@ -667,25 +644,11 @@ def process_animations_visual(operator, context, skn_filepath, armature_obj, dis
         try:
             anm_data = import_anm.read_anm(backup_src)
 
-            # For the first ANM, dump track hashes to help diagnose hash mismatches
-            if processed == 0:
-                track_hashes = [hex(t.joint_hash) for t in anm_data.tracks]
-                print(f"[visual_anm] First ANM '{filename}': {len(anm_data.tracks)} tracks")
-                # Show which tracks match the adjust set
-                for t in anm_data.tracks:
-                    if t.joint_hash in is_custom_parent_adjust:
-                        print(f"[visual_anm]   MATCH track hash={t.joint_hash:#010x}")
-
-            adjusted_count = 0
             for track in anm_data.tracks:
                 entry = is_custom_parent_adjust.get(track.joint_hash)
                 if entry is None:
                     continue
                 adj, l_int_bind_L, int_name, bone_name = entry
-                adjusted_count += 1
-
-                # Print before/after for frame 0 of first ANM to confirm values change
-                _diag_printed = False
 
                 for f_id, pose in track.poses.items():
                     n_t = pose.translation if pose.translation is not None else mathutils.Vector((0, 0, 0))
@@ -697,27 +660,9 @@ def process_animations_visual(operator, context, skn_filepath, armature_obj, dis
                     l_visual = adj @ l_native
                     t_v, r_v, s_v = l_visual.decompose()
 
-                    if processed == 0 and not _diag_printed:
-                        _diag_printed = True
-                        _angle_change = n_r.rotation_difference(r_v.normalized()).angle
-                        print(f"[visual_anm] {bone_name!r} (via intermediate {int_name!r}) frame {f_id}:")
-                        print(f"[visual_anm]   BACKUP  r=({n_r.w:.4f},{n_r.x:.4f},{n_r.y:.4f},{n_r.z:.4f})")
-                        print(f"[visual_anm]   VISUAL  r=({r_v.w:.4f},{r_v.x:.4f},{r_v.y:.4f},{r_v.z:.4f})")
-                        print(f"[visual_anm]   rotation change: {_angle_change*57.3:.2f}°  {'(LARGE — good)' if _angle_change > 0.05 else '(SMALL — check backup contamination!)'}")
-                        # Contamination check: if BACKUP ≈ what we'd compute for an already-adjusted value,
-                        # i.e. l_int_bind_L @ l_before ≈ "native-looking" (would undo a previous adjustment),
-                        # the backup might already be visual.  Print the round-trip result:
-                        l_roundtrip = l_int_bind_L @ l_native
-                        _, _rt_r, _ = l_roundtrip.decompose()
-                        print(f"[visual_anm]   ROUNDTRIP (l_bind @ backup_native): r=({_rt_r.w:.4f},{_rt_r.x:.4f},{_rt_r.y:.4f},{_rt_r.z:.4f})")
-                        print(f"[visual_anm]   (if ROUNDTRIP ≈ identity the backup is already visual/contaminated)")
-
                     pose.translation = t_v
                     pose.rotation    = r_v.normalized()
                     pose.scale       = s_v
-
-            if processed == 0:
-                print(f"[visual_anm] First ANM: adjusted {adjusted_count} track(s)")
 
             export_anm.write_anm_from_data(
                 dst_path, anm_data,
@@ -784,6 +729,10 @@ def save(operator, context, filepath, export_skl_file=True, clean_names=True, ta
         return {'CANCELLED'}
     
     try:
+        for name in bone_utils.find_unbaked_pose_offsets(armature_obj):
+            operator.report({'WARNING'},
+                            f"'{name}' has an unbaked Pose Mode offset that will NOT export. "
+                            f"Use 'Set Offset from Pose' (N-panel) or move it in Edit Mode.")
         submesh_count, vertex_count = write_skn_multi(filepath, mesh_objects, armature_obj, clean_names, disable_scaling, disable_transforms, use_visual_pose)
         operator.report({'INFO'}, f"Exported SKN: {submesh_count} submeshes, {vertex_count} vertices")
 

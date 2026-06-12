@@ -167,7 +167,7 @@ def create_mesh(indices, vertices, submeshes, name, armature_obj=None, joints=No
     return obj
 
 
-def load(operator, context, filepath, load_skl_file=True, split_by_material=False, auto_load_textures=True):
+def load(operator, context, filepath, load_skl_file=True, split_by_material=False, auto_load_textures=True, bone_orient='VISUAL'):
     try:
         indices, vertices, submeshes = read_skn(filepath)
         
@@ -183,7 +183,7 @@ def load(operator, context, filepath, load_skl_file=True, split_by_material=Fals
             if os.path.exists(skl_path):
                 try:
                     joints, influences = import_skl.read_skl(skl_path)
-                    armature_obj = import_skl.create_armature(joints)
+                    armature_obj = import_skl.create_armature(joints, bone_orient=bone_orient)
                 except Exception as e:
                     operator.report({'WARNING'}, f'SKL load failed: {str(e)}')
         

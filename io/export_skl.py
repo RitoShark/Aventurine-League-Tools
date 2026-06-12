@@ -3,6 +3,7 @@ import mathutils
 import os
 from ..utils.binary_utils import BinaryStream, Hash
 from . import import_skl
+from . import bone_utils
 
 def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=False, use_visual_pose=False):
     """Write Blender armature to SKL file (Version 0)"""
@@ -39,9 +40,11 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
     all_bone_names_in_export = {b.name for b in bone_list}
 
     def get_export_name(bone_name):
-        if '.' not in bone_name:
+        # Strip numeric duplicate suffixes only — non-numeric dot suffixes
+        # (Hand.L, Bip01.Spine) are part of the bone's identity.
+        clean = bone_utils.clean_export_bone_name(bone_name)
+        if clean == bone_name:
             return bone_name
-        clean = bone_name.split('.')[0]
         # If the clean base name exists as another bone, keep the full suffix
         if clean in all_bone_names_in_export:
             return bone_name
@@ -53,6 +56,20 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
     # format: [bone_index] = (Matrix_Global_League, Matrix_Local_League)
 
     league_matrices = {}
+
+    # Native global rest matrix in Blender space (falls back to the visual rest
+    # for bones without stored data, e.g. user-added or non-League skeletons).
+    # This is the same convention export_anm uses to build correction matrices.
+    def get_native_global_blender(pb):
+        stored = pb.get("native_global_rest_mat")
+        if stored and len(stored) == 16:
+            return mathutils.Matrix((stored[0:4], stored[4:8], stored[8:12], stored[12:16]))
+        return pb.bone.matrix_local.copy()
+
+    # Duplicates of native bones used as "offset holders" (Shift+D copies the
+    # pose-bone custom props, so these would otherwise take the native-bind
+    # branch below and silently export the ORIGINAL bone's bind as their own).
+    offset_clones = bone_utils.detect_offset_clones(armature_obj)
 
     # If use_visual_pose, evaluate frame 0 to get the posed transforms
     frame0_matrices = {}
@@ -76,7 +93,45 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
         nb_r = pbone.get("native_bind_r")
         nb_s = pbone.get("native_bind_s")
 
-        if nb_t and nb_r and nb_s and not use_visual_pose:
+        clone_target = offset_clones.get(pbone.name) if not use_visual_pose else None
+
+        if clone_target is not None:
+            # Duplicated native bone.  When spliced above its original (the
+            # "Shift+D, offset, export" workflow), write the AUTHORED world
+            # delta (clone placement vs the original bone) conjugated into the
+            # parent's native frame.  The original keeps its untouched native
+            # bind below (custom-chain adjustment preserves its rest global),
+            # so the bind pose stays identical to the authored mesh while every
+            # stock animation composes through this local and plays the whole
+            # subtree offset by exactly the authored delta.
+            # An un-spliced duplicate is just an added bone: export it at its
+            # visual placement like any other custom bone.
+            target_pb = bones.get(clone_target)
+            spliced = (target_pb is not None and target_pb.parent is not None
+                       and target_pb.parent.name == pbone.name)
+            if spliced and pbone.parent:
+                n_p = get_native_global_blender(pbone.parent)
+                delta = pbone.bone.matrix_local @ target_pb.bone.matrix_local.inverted()
+                try:
+                    b_local = n_p.inverted() @ delta @ n_p
+                except ValueError:
+                    b_local = pbone.bone.matrix_local
+                # The clone's scale dial lives in its POSE channel — Blender
+                # rest bones are scale-less, so this is the only authoring
+                # channel that can survive to export. Composed last (T·R·S),
+                # in Blender axes, before the League conversion below.
+                ps = pbone.scale
+                if abs(ps.x - 1.0) + abs(ps.y - 1.0) + abs(ps.z - 1.0) > 1e-5:
+                    b_local = b_local @ mathutils.Matrix.Diagonal((ps.x, ps.y, ps.z, 1.0))
+            elif pbone.parent:
+                try:
+                    b_local = get_native_global_blender(pbone.parent).inverted() @ pbone.bone.matrix_local
+                except ValueError:
+                    b_local = pbone.bone.matrix_local
+            else:
+                b_local = pbone.bone.matrix_local
+            l_mat_local = P_inv @ b_local @ P
+        elif nb_t and nb_r and nb_s and not use_visual_pose:
             # Use Original Native Bind (Preserves offsets and orientation)
             # This ignores Blender's visual edits to Head/Tail, which is GOOD for game compatibility
             lm_t = mathutils.Matrix.Translation(mathutils.Vector(nb_t))
@@ -121,11 +176,21 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
             # Convert to League: L = P_inv @ B @ P
             l_mat_local = P_inv @ b_local @ P
         else:
-            # New Bone or Missing Data: Convert Blender Rest Pose to League
-            # Blender Local: Parent_Inv @ Child
+            # New Bone or Missing Data: Convert Blender Rest Pose to League.
+            #
+            # The local must be expressed in the parent's NATIVE frame, because
+            # the parent global it gets composed onto below was reconstructed
+            # from native bind data — NOT from the parent's visual (Blender)
+            # orientation, which differs from native by the per-bone correction
+            # rotation (tails/rolls are cosmetic on import).  This mirrors what
+            # export_anm writes for custom bones (n_local = C_parent @ v_local,
+            # which at rest equals N_parent⁻¹ @ V_bone), so the bone's SKL bind
+            # matches both its visual placement and its exported ANM tracks.
+            # For skeletons without stored native data (e.g. FBX imports) the
+            # native frame falls back to the visual frame, leaving them unchanged.
             if pbone.parent:
                 try:
-                    b_local = pbone.parent.bone.matrix_local.inverted() @ pbone.bone.matrix_local
+                    b_local = get_native_global_blender(pbone.parent).inverted() @ pbone.bone.matrix_local
                 except ValueError:
                     b_local = pbone.bone.matrix_local
             else:
@@ -259,6 +324,10 @@ def save(operator, context, filepath, target_armature=None, disable_scaling=Fals
         return {'CANCELLED'}
 
     try:
+        for name in bone_utils.find_unbaked_pose_offsets(armature_obj):
+            operator.report({'WARNING'},
+                            f"'{name}' has an unbaked Pose Mode offset that will NOT export. "
+                            f"Use 'Set Offset from Pose' (N-panel) or move it in Edit Mode.")
         write_skl(filepath, armature_obj, disable_scaling, disable_transforms, use_visual_pose)
         operator.report({'INFO'}, f"Exported SKL: {filepath}")
         return {'FINISHED'}

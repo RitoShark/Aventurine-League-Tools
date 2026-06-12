@@ -5,8 +5,9 @@ import mathutils
 import math
 from ..utils.binary_utils import BinaryStream, Hash
 from . import import_skl
+from . import bone_utils
 
-def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False, visual_mode=False):
+def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False, visual_mode=False, use_scene_range=False):
     """Write Blender animation to ANM file (Uncompressed v4 format).
 
     Mirrors the unified import math:
@@ -40,6 +41,13 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
             new_bones.append(b)
     native_bones.sort(key=lambda x: x[0])
     bones = [b for _, b in native_bones] + new_bones
+
+    # Offset-holder clones (duplicates of native bones) never get a track in
+    # normal mode: the game must hold them at their SKL bind local (the
+    # authored offset), so stock and Blender-exported animations compose
+    # through the exact same transform.  Writing a track for them would fight
+    # the bind written by export_skl.
+    _offset_clones = bone_utils.detect_offset_clones(armature_obj)
 
     # In visual mode: build a set of custom-intermediate bone names to skip.
     # Custom intermediates are bones that share a native_bone_index with another
@@ -84,6 +92,20 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
     # Import puts bind at frame 0, animation starts at frame 1
     frame_start = max(1, int(action.frame_range[0]))
     frame_end = int(action.frame_range[1])
+
+    # Clamp to the scene timeline so the time bar controls what gets exported
+    # (interactive export only — batch flows export each action's full range).
+    if use_scene_range:
+        scn = bpy.context.scene
+        clamped_start = max(frame_start, int(scn.frame_start))
+        clamped_end = min(frame_end, int(scn.frame_end))
+        if clamped_end < clamped_start:
+            raise Exception(
+                f"Scene frame range {scn.frame_start}-{scn.frame_end} doesn't overlap "
+                f"the animation's frame range {frame_start}-{frame_end}"
+            )
+        frame_start, frame_end = clamped_start, clamped_end
+
     frame_count = max(1, frame_end - frame_start + 1)
     
     # Palettes for deduplication
@@ -333,6 +355,10 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                 if pbone.name in _visual_skip:
                     continue
 
+                # Normal mode: offset-holder clones stay trackless (see above).
+                if not visual_mode and pbone.name in _offset_clones:
+                    continue
+
                 # Bone-to-bone local — same for every bone.
                 anim_parent = pbone.parent
                 if anim_parent:
@@ -456,13 +482,14 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                 # explicit ANM track.  Without this, R_Clavicle.001 would fall
                 # back to whatever the viewer/game uses for missing bones — which
                 # may be identity rather than the SKL bind pose, breaking the arm.
-                # In normal mode: strip .001 so native duplicates collapse to the
-                # same hash as the original bone (hash-collision fix below handles
-                # data priority).
+                # In normal mode: strip numeric duplicate suffixes only (.001),
+                # never at the first dot — Hand.L / Hand.R are distinct bones
+                # and collapsing them corrupts the export (hash-collision fix
+                # below handles data priority for true duplicates).
                 if visual_mode:
                     bone_name = pbone.name
                 else:
-                    bone_name = pbone.name.split('.')[0] if '.' in pbone.name else pbone.name
+                    bone_name = bone_utils.clean_export_bone_name(pbone.name)
                 h = Hash.elf(bone_name)
 
                 if h not in joint_data:
@@ -470,7 +497,7 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
 
                 if len(joint_data[h]) == f_idx:
                     joint_data[h].append((t_id, s_id, r_id))
-                elif not visual_mode and '.' not in pbone.name and len(joint_data[h]) > f_idx:
+                elif not visual_mode and bone_name == pbone.name and len(joint_data[h]) > f_idx:
                     # Non-visual mode: two bones share the same cleaned hash
                     # (e.g. "R_Clavicle" and "R_Clavicle.001").  The .001 duplicate
                     # was processed first and already wrote a slot for this frame.
@@ -481,8 +508,16 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
         bpy.context.scene.frame_set(current_frame_orig)
 
     # --- 4. Write Binary File ---
+    # Palette indices are stored as uint16, so the format caps each palette at 65535.
+    if len(vec_palette) > 65535 or len(quat_palette) > 65535:
+        raise Exception(
+            f"Animation too long for the ANM format: {len(vec_palette)} translation/scale "
+            f"values and {len(quat_palette)} rotations exceed the 65535 palette limit. "
+            f"Shorten the exported frame range (currently frames {frame_start}-{frame_end})."
+        )
+
     sorted_hashes = sorted(joint_data.keys())
-    
+
     with open(filepath, 'wb') as f:
         bs = BinaryStream(f)
         
@@ -597,6 +632,14 @@ def write_anm_from_data(filepath, anm_data, fps=None, disable_scaling=False):
             r_id = add_quat(r)
             frame_entries.append((h, t_id, s_id, r_id))
 
+    # Palette indices are stored as uint16, so the format caps each palette at 65535.
+    if len(vec_palette) > 65535 or len(quat_palette) > 65535:
+        raise Exception(
+            f"Animation too long for the ANM format: {len(vec_palette)} translation/scale "
+            f"values and {len(quat_palette)} rotations exceed the 65535 palette limit. "
+            f"Shorten the animation ({frame_count} frames)."
+        )
+
     with open(filepath, 'wb') as f:
         bs = BinaryStream(f)
 
@@ -636,7 +679,7 @@ def write_anm_from_data(filepath, anm_data, fps=None, disable_scaling=False):
     return True
 
 
-def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False):
+def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False, use_scene_range=True):
     armature_obj = target_armature
 
     if not armature_obj:
@@ -650,7 +693,7 @@ def save(operator, context, filepath, target_armature=None, disable_scaling=Fals
 
     try:
         fps = context.scene.render.fps
-        write_anm(filepath, armature_obj, fps, disable_scaling, disable_transforms, flip, adapt_to_edits=adapt_to_edits)
+        write_anm(filepath, armature_obj, fps, disable_scaling, disable_transforms, flip, adapt_to_edits=adapt_to_edits, use_scene_range=use_scene_range)
         operator.report({'INFO'}, f"Exported ANM: {filepath}")
         return {'FINISHED'}
     except Exception as e:

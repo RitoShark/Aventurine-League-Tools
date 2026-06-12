@@ -118,7 +118,18 @@ def read_skl(filepath):
     return joints, influences
 
 
-def create_armature(joints, name="Armature"):
+def create_armature(joints, name="Armature", bone_orient='VISUAL'):
+    """Build a Blender armature from SKL joints.
+
+    bone_orient:
+      'VISUAL' — classic look: connected bones pointing at children, cosmetic
+                 roll. Bone rest frames do NOT match the native joint frames;
+                 exporters reconcile the two via the stored correction props.
+      'NATIVE' — exact joints: every bone's rest frame equals the native joint
+                 frame from the file (tail length is cosmetic only). Corrections
+                 evaluate to identity, and animations stay 1:1 compatible with
+                 rigs from other tools (FBX etc.) that share the skeleton.
+    """
     # Pass 1: Global positions via matrices (including scale in the chain)
     # Recursive/memoized so that joints whose parent has a higher index (e.g.
     # visual SKLs where custom bones are appended after native bones but are
@@ -149,14 +160,51 @@ def create_armature(joints, name="Armature"):
     bpy.context.view_layer.objects.active = armature_obj
     
     bpy.ops.object.mode_set(mode='EDIT')
-    
+
+    if bone_orient == 'NATIVE':
+        # Exact joints: bone frame = native joint frame; length is cosmetic.
+        # Use the distance to the nearest child for length so bones stay
+        # clickable, falling back to the parent's value for leaf joints.
+        child_dist = [0.0] * len(joints)
+        for i, joint in enumerate(joints):
+            dists = [(joints[c].global_pos - joint.global_pos).length
+                     for c in range(len(joints)) if joints[c].parent == i]
+            child_dist[i] = min((d for d in dists if d > 0.005), default=0.0)
+
+        for i, joint in enumerate(joints):
+            length = child_dist[i]
+            if length <= 0.005 and joint.parent >= 0:
+                length = child_dist[joint.parent]
+            if length <= 0.005:
+                length = 0.05
+
+            bone = armature_data.edit_bones.new(joint.name)
+            bone.head = (0.0, 0.0, 0.0)
+            bone.tail = (0.0, length, 0.0)
+            # Bones cannot carry rest scale — keep translation+rotation only.
+            # (Scaled/degenerate joints keep their full data in the props, and
+            # the correction math reconciles the residual difference.)
+            t, r, _s = mats[i].decompose()
+            bone.matrix = mathutils.Matrix.LocRotScale(t, r, None)
+
+        for i, joint in enumerate(joints):
+            if joint.parent >= 0:
+                bone = armature_data.edit_bones[joint.name]
+                bone.parent = armature_data.edit_bones[joints[joint.parent].name]
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+        # Octahedrons are unreadable on native joint orientations.
+        armature_data.display_type = 'STICK'
+        _store_native_props(joints, mats, armature_obj)
+        return armature_obj
+
     # Pass 2: Create bones and set heads
     for i, joint in enumerate(joints):
         bone = armature_data.edit_bones.new(joint.name)
         bone.head = joint.global_pos
         # Temporary tail
         bone.tail = bone.head + mathutils.Vector((0, 0, 0.1))
-        
+
     # Pass 3: Set Parenting
     for i, joint in enumerate(joints):
         if joint.parent >= 0:
@@ -202,7 +250,28 @@ def create_armature(joints, name="Armature"):
             bone.tail = bone.head + mathutils.Vector((0, 0, 0.1))
 
     bpy.ops.object.mode_set(mode='OBJECT')
-    
+
+    _store_native_props(joints, mats, armature_obj)
+    return armature_obj
+
+
+def _store_native_props(joints, mats, armature_obj):
+    # Offset-clone joints (numeric-suffix duplicates of another joint in the
+    # same file) carry their scale dial in the bind local. Restore it to the
+    # pose channel — the addon's authoring convention for clone scale — so the
+    # viewport previews the scaled subtree and a re-export round-trips it.
+    # Deliberately NOT done for ordinary scaled native joints: their scale is
+    # already baked into the computed bone positions.
+    import re as _re
+    _names = {j.name for j in joints}
+    for joint in joints:
+        base = _re.sub(r'\.\d+$', '', joint.name)
+        if base == joint.name or base not in _names:
+            continue
+        s = joint.local_scale
+        if abs(s.x - 1.0) + abs(s.y - 1.0) + abs(s.z - 1.0) > 1e-4:
+            armature_obj.pose.bones[joint.name].scale = (s.x, s.y, s.z)
+
     # Pass 5: Store bind pose for animator (scale is already baked into bone positions)
     for i, joint in enumerate(joints):
         pbone = armature_obj.pose.bones[joint.name]
@@ -255,11 +324,11 @@ def create_armature(joints, name="Armature"):
     return armature_obj
 
 
-def load(operator, context, filepath):
+def load(operator, context, filepath, bone_orient='VISUAL'):
     try:
         import os
         joints, influences = read_skl(filepath)
-        armature_obj = create_armature(joints)
+        armature_obj = create_armature(joints, bone_orient=bone_orient)
         
         # Store import path for export convenience
         armature_obj["lol_skl_filepath"] = filepath

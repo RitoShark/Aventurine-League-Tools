@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (2, 9, 4),
+    "version": (3, 0, 0),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -20,6 +20,7 @@ from .tools import limit_influences
 from .tools import uv_corners
 from .tools import normals
 from .tools import bind_pose
+from .tools import offset_bones
 from .io import export_scb
 from .io import export_sco
 from .utils import history
@@ -295,6 +296,8 @@ class LolAddonPreferences(bpy.types.AddonPreferences):
 class ImportSKN(bpy.types.Operator, ImportHelper):
     bl_idname = "import_scene.skn"
     bl_label = "Import SKN"
+    bl_description = ("Import a League of Legends skinned mesh (.skn), optionally with its "
+                      "skeleton (.skl) and textures")
     bl_options = {'PRESET', 'UNDO'}
     
     filename_ext = ".skn"
@@ -318,6 +321,19 @@ class ImportSKN(bpy.types.Operator, ImportHelper):
         default=True
     )
 
+    bone_orient: bpy.props.EnumProperty(
+        name="Bones",
+        description="How to orient the skeleton's bones",
+        items=[
+            ('VISUAL', "Connected Bones (Classic)",
+             "Bones point at their children for a clean connected look. Best for League-only skin work"),
+            ('NATIVE', "Exact Joints",
+             "Bones keep the exact joint orientations from the file (drawn as sticks). "
+             "Keeps animations 1:1 compatible with the same skeleton in other tools (FBX, Maya, other games)"),
+        ],
+        default='VISUAL'
+    )
+
     def draw(self, context):
         """Draw the import settings UI"""
         layout = self.layout
@@ -327,10 +343,11 @@ class ImportSKN(bpy.types.Operator, ImportHelper):
         layout.prop(self, "load_skl")
         layout.prop(self, "split_by_material")
         layout.prop(self, "auto_load_textures")
+        layout.prop(self, "bone_orient")
 
     def execute(self, context):
         from .io import import_skn
-        result = import_skn.load(self, context, self.filepath, self.load_skl, self.split_by_material, self.auto_load_textures)
+        result = import_skn.load(self, context, self.filepath, self.load_skl, self.split_by_material, self.auto_load_textures, bone_orient=self.bone_orient)
         if result == {'FINISHED'}:
             history.add_to_history(context, self.filepath, 'SKN')
         return result
@@ -340,20 +357,36 @@ class ImportSKN(bpy.types.Operator, ImportHelper):
 class ImportSKL(bpy.types.Operator, ImportHelper):
     bl_idname = "import_scene.skl"
     bl_label = "Import SKL"
+    bl_description = "Import a League of Legends skeleton (.skl) as an armature"
     bl_options = {'PRESET', 'UNDO'}
 
     filename_ext = ".skl"
     filter_glob: StringProperty(default="*.skl", options={'HIDDEN'})
 
+    bone_orient: bpy.props.EnumProperty(
+        name="Bones",
+        description="How to orient the skeleton's bones",
+        items=[
+            ('VISUAL', "Connected Bones (Classic)",
+             "Bones point at their children for a clean connected look. Best for League-only skin work"),
+            ('NATIVE', "Exact Joints",
+             "Bones keep the exact joint orientations from the file (drawn as sticks). "
+             "Keeps animations 1:1 compatible with the same skeleton in other tools (FBX, Maya, other games)"),
+        ],
+        default='VISUAL'
+    )
+
     def execute(self, context):
         from .io import import_skl
-        return import_skl.load(self, context, self.filepath)
+        return import_skl.load(self, context, self.filepath, bone_orient=self.bone_orient)
 
 
 # Import operator for ANM files
 class ImportANM(bpy.types.Operator, ImportHelper):
     bl_idname = "import_scene.anm"
     bl_label = "Import ANM"
+    bl_description = ("Import League of Legends animations (.anm) onto the active armature. "
+                      "Supports multiple files at once")
     bl_options = {'PRESET', 'UNDO'}
     
     filename_ext = ".anm"
@@ -408,8 +441,11 @@ class ImportANM(bpy.types.Operator, ImportHelper):
             return {'CANCELLED'}
         
         imported_count = 0
-        max_frame_end = context.scene.frame_end  # Track the longest animation
-        
+        # Track the longest imported animation. New Action mode starts at 0 so the
+        # timeline shrinks to fit when the new animation is shorter than the old
+        # range; Insert mode keeps the existing end so inserts only ever extend it.
+        max_frame_end = 0 if self.import_mode == 'NEW_ACTION' else context.scene.frame_end
+
         for filepath in filepaths:
             insert_frame = context.scene.frame_current if self.import_mode == 'INSERT_AT_FRAME' else 0
             create_new_action = self.import_mode == 'NEW_ACTION'
@@ -420,9 +456,9 @@ class ImportANM(bpy.types.Operator, ImportHelper):
                 # Track the longest animation's end frame
                 if context.scene.frame_end > max_frame_end:
                     max_frame_end = context.scene.frame_end
-        
+
         # Set scene to longest animation so all frames are visible
-        if imported_count > 0:
+        if imported_count > 0 and max_frame_end > 0:
             context.scene.frame_end = max_frame_end
         
         if imported_count > 1:
@@ -540,10 +576,30 @@ class ImportSCO_DragDrop(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class ImportMAPGEO_DragDrop(bpy.types.Operator):
+    """Import MAPGEO file from drag-and-drop"""
+    bl_idname = "import_scene.mapgeo_dragdrop"
+    bl_label = "Import MAPGEO"
+    bl_options = {'INTERNAL'}
+
+    filepath: StringProperty(subtype='FILE_PATH', options={'HIDDEN', 'SKIP_SAVE'})
+
+    def execute(self, context):
+        prefs = context.preferences.addons[__package__].preferences
+
+        if prefs.direct_drag_drop:
+            from .io import import_mapgeo
+            return import_mapgeo.load(self, context, self.filepath)
+
+        bpy.ops.import_scene.mapgeo('INVOKE_DEFAULT', filepath=self.filepath)
+        return {'FINISHED'}
+
+
 # Import operator for SCB files
 class ImportSCB(bpy.types.Operator, ImportHelper):
     bl_idname = "import_scene.scb"
     bl_label = "Import SCB"
+    bl_description = "Import a League of Legends static object (.scb)"
     bl_options = {'PRESET', 'UNDO'}
 
     filename_ext = ".scb"
@@ -558,6 +614,7 @@ class ImportSCB(bpy.types.Operator, ImportHelper):
 class ImportSCO(bpy.types.Operator, ImportHelper):
     bl_idname = "import_scene.sco"
     bl_label = "Import SCO"
+    bl_description = "Import a League of Legends static object with pivot point (.sco)"
     bl_options = {'PRESET', 'UNDO'}
 
     filename_ext = ".sco"
@@ -568,10 +625,68 @@ class ImportSCO(bpy.types.Operator, ImportHelper):
         return import_sco.load(self, context, self.filepath)
 
 
+# Import operator for MAPGEO files
+class ImportMAPGEO(bpy.types.Operator, ImportHelper):
+    bl_idname = "import_scene.mapgeo"
+    bl_label = "Import MAPGEO"
+    bl_description = "Import a League of Legends map (.mapgeo). May take a bit to import"
+    bl_options = {'PRESET', 'UNDO'}
+
+    filename_ext = ".mapgeo"
+    filter_glob: StringProperty(default="*.mapgeo", options={'HIDDEN'})
+
+    name_by_material: BoolProperty(
+        name="Name by Material",
+        description="Name objects after their dominant material instead of MapGeo_Instance_N "
+                    "(maps newer than v11 store no mesh names). Cosmetic only — "
+                    "not written back on export",
+        default=True
+    )
+
+    import_textures: BoolProperty(
+        name="Import Textures",
+        description="Texture the map from its materials.bin (must sit next to the .mapgeo) "
+                    "and the extract's assets folder. Missing textures leave slots untextured",
+        default=True
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = False
+        layout.prop(self, "name_by_material")
+        layout.prop(self, "import_textures")
+
+    def execute(self, context):
+        from .io import import_mapgeo
+        return import_mapgeo.load(self, context, self.filepath,
+                                  name_by_material=self.name_by_material,
+                                  import_textures=self.import_textures)
+
+
+# Placeholder until the mapgeo exporter ships — owns the bl_idname so UI code
+# doesn't change when it does
+class ExportMAPGEO(bpy.types.Operator):
+    bl_idname = "export_scene.mapgeo"
+    bl_label = "Export MAPGEO"
+    bl_description = "Coming soon"
+    bl_options = {'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        cls.poll_message_set("Coming soon")
+        return False
+
+    def execute(self, context):
+        return {'CANCELLED'}
+
+
 # Export operator for SKN
 class ExportSKN(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.skn"
     bl_label = "Export SKN"
+    bl_description = ("Export the selected mesh as a League of Legends skinned mesh (.skn), "
+                      "optionally with its skeleton (.skl)")
     bl_options = {'PRESET', 'UNDO'}
     
     filename_ext = ".skn"
@@ -778,6 +893,7 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
 class ExportSKL(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.skl"
     bl_label = "Export SKL"
+    bl_description = "Export the active armature as a League of Legends skeleton (.skl)"
     bl_options = {'PRESET', 'UNDO'}
 
     filename_ext = ".skl"
@@ -844,6 +960,8 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
 class ExportANM(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.anm"
     bl_label = "Export ANM"
+    bl_description = ("Export the active armature's animation as a League of Legends "
+                      "animation (.anm)")
     bl_options = {'PRESET', 'UNDO'}
 
     filename_ext = ".anm"
@@ -877,6 +995,12 @@ class ExportANM(bpy.types.Operator, ExportHelper):
         name="Batch Export All Actions",
         description="Export every animation action as a separate ANM file in the selected folder",
         default=False
+    )
+
+    use_scene_range: BoolProperty(
+        name="Use Timeline Range",
+        description="Only export frames within the scene's start/end frame range. Disable to export the action's full length",
+        default=True
     )
 
     target_armature_name: StringProperty(options={'HIDDEN'})
@@ -919,6 +1043,8 @@ class ExportANM(bpy.types.Operator, ExportHelper):
         layout.prop(self, "disable_scaling")
         layout.prop(self, "disable_transforms")
         layout.prop(self, "batch_export_all_actions")
+        if not self.batch_export_all_actions:
+            layout.prop(self, "use_scene_range")
         layout.prop(self, "flip")
 
     def invoke(self, context, event):
@@ -952,7 +1078,7 @@ class ExportANM(bpy.types.Operator, ExportHelper):
         from .io import export_anm
         target_armature = context.scene.objects.get(self.target_armature_name) if self.target_armature_name else None
         if not self.batch_export_all_actions:
-            return export_anm.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms, flip=self.flip)
+            return export_anm.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms, flip=self.flip, use_scene_range=self.use_scene_range)
 
         if not target_armature:
             target_armature = context.active_object if context.active_object and context.active_object.type == 'ARMATURE' else None
@@ -1031,6 +1157,9 @@ def menu_func_import_scb(self, context):
 def menu_func_import_sco(self, context):
     self.layout.operator(ImportSCO.bl_idname, text="League of Legends SCO (.sco)")
 
+def menu_func_import_mapgeo(self, context):
+    self.layout.operator(ImportMAPGEO.bl_idname, text="League of Legends Map (.mapgeo)")
+
 def menu_func_export_skn(self, context):
     self.layout.operator(ExportSKN.bl_idname, text="League of Legends SKN (.skn)")
 
@@ -1066,6 +1195,8 @@ def register():
     bpy.utils.register_class(ImportANM)
     bpy.utils.register_class(ImportSCB)
     bpy.utils.register_class(ImportSCO)
+    bpy.utils.register_class(ImportMAPGEO)
+    bpy.utils.register_class(ExportMAPGEO)
 
     # Register drag-drop only operators
     bpy.utils.register_class(ImportSKN_DragDrop)
@@ -1073,6 +1204,7 @@ def register():
     bpy.utils.register_class(ImportSKL_DragDrop)
     bpy.utils.register_class(ImportSCB_DragDrop)
     bpy.utils.register_class(ImportSCO_DragDrop)
+    bpy.utils.register_class(ImportMAPGEO_DragDrop)
 
     bpy.utils.register_class(ExportSKN)
     bpy.utils.register_class(ExportSKL)
@@ -1101,6 +1233,9 @@ def register():
     # Register bind pose operators
     bind_pose.register()
 
+    # Register offset-bone operators
+    offset_bones.register()
+
     # Register UI Panels (main panel first so it appears at top of N panel)
     bpy.utils.register_class(panels.LOL_PT_MainPanel)
     bpy.utils.register_class(panels.UV_CORNER_PT_panel)
@@ -1113,6 +1248,7 @@ def register():
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_anm)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_scb)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_sco)
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_mapgeo)
     
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_skn)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_skl)
@@ -1221,6 +1357,8 @@ def unregister():
     bpy.utils.unregister_class(ImportANM)
     bpy.utils.unregister_class(ImportSCB)
     bpy.utils.unregister_class(ImportSCO)
+    bpy.utils.unregister_class(ImportMAPGEO)
+    bpy.utils.unregister_class(ExportMAPGEO)
 
     # Unregister drag-drop only operators
     bpy.utils.unregister_class(ImportSKN_DragDrop)
@@ -1228,6 +1366,7 @@ def unregister():
     bpy.utils.unregister_class(ImportSKL_DragDrop)
     bpy.utils.unregister_class(ImportSCB_DragDrop)
     bpy.utils.unregister_class(ImportSCO_DragDrop)
+    bpy.utils.unregister_class(ImportMAPGEO_DragDrop)
 
     bpy.utils.unregister_class(ExportSKN)
     bpy.utils.unregister_class(ExportSKL)
@@ -1252,7 +1391,9 @@ def unregister():
     
     # Unregister bind pose operators
     bind_pose.unregister()
-    
+
+    offset_bones.unregister()
+
     smart_weights.unregister()
     
     # Unregister UI Panels
@@ -1264,6 +1405,7 @@ def unregister():
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_anm)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_scb)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_sco)
+    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_mapgeo)
     
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_skn)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_skl)

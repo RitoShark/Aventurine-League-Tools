@@ -68,12 +68,25 @@ if _HAS_FILE_HANDLER:
             return context.area and context.area.type in {'VIEW_3D', 'OUTLINER'}
 
 
+    class FH_MAPGEO_Import(bpy.types.FileHandler):
+        """File handler for dragging .mapgeo files into Blender"""
+        bl_idname = "LOL_FH_mapgeo_import"
+        bl_label = "MAPGEO File Handler"
+        bl_import_operator = "import_scene.mapgeo_dragdrop"
+        bl_file_extensions = ".mapgeo"
+
+        @classmethod
+        def poll_drop(cls, context):
+            return context.area and context.area.type in {'VIEW_3D', 'OUTLINER'}
+
+
     classes = (
         FH_SKN_Import,
         FH_SKL_Import,
         FH_ANM_Import,
         FH_SCB_Import,
         FH_SCO_Import,
+        FH_MAPGEO_Import,
     )
 else:
     classes = ()

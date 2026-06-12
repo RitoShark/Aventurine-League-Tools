@@ -531,7 +531,6 @@ def apply_anm(anm, armature_obj, frame_offset=0, flip=False, adapt_to_edits=Fals
                     rest_v_local = _get_stored_ml(native_anc_pb).inverted() @ _get_stored_ml(pbone)
                 except ValueError:
                     rest_v_local = _get_stored_ml(pbone)
-                print(f"[ANM] custom parent: {pbone.name!r} -> native ancestor: {native_anc_pb.name!r}")
             elif native_parent and native_parent in corrections:
                 C_parent = corrections[native_parent]
                 np_pb = armature_obj.pose.bones.get(native_parent)
@@ -542,11 +541,9 @@ def apply_anm(anm, armature_obj, frame_offset=0, flip=False, adapt_to_edits=Fals
                         rest_v_local = _get_stored_ml(pbone)
                 else:
                     rest_v_local = _get_stored_ml(pbone)
-                print(f"[ANM] custom parent: {pbone.name!r} -> native_parent fallback: {native_parent!r}")
             else:
                 C_parent = mathutils.Matrix.Identity(4)
                 rest_v_local = _get_stored_ml(pbone)
-                print(f"[ANM] custom parent: {pbone.name!r} -> no native ancestor (identity)")
         else:
             # Normal path: prefer stored native_parent, fall back to current.
             if native_parent and native_parent in corrections:
@@ -704,9 +701,6 @@ def apply_anm(anm, armature_obj, frame_offset=0, flip=False, adapt_to_edits=Fals
         if any(bone_data[k] for k in bone_data):
             bone_keyframes[pbone.name] = bone_data
 
-    print(f"Matched {matched_count} tracks to bones")
-    print(f"Bones with keyframe data: {len(bone_keyframes)}")
-
     # --- 3b. Fix quaternion sign continuity ---
     # The "smallest three" quaternion compression always reconstructs the
     # dropped component as positive (via sqrt), but different components may
@@ -811,8 +805,6 @@ def apply_anm(anm, armature_obj, frame_offset=0, flip=False, adapt_to_edits=Fals
                     setattr(pbone, prop_name, value)
                     pbone.keyframe_insert(data_path=prop_name, frame=frame)
                     total_keyframes += num_channels
-
-    print(f"Inserted {total_keyframes} keyframe channels")
 
     # Blender 4.4/4.5 slotted actions: the legacy action.fcurves proxy creates
     # keyframes inside a slot, but doesn't auto-bind that slot to the armature.
