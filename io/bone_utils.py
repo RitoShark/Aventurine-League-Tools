@@ -2,6 +2,8 @@
 import re
 
 _NUMERIC_SUFFIX = re.compile(r'\.\d+$')
+# Anything Maya (and a clean League pipeline) won't accept in a node/joint name.
+_ILLEGAL_NAME_CHARS = re.compile(r'[^A-Za-z0-9_]')
 
 
 def clean_export_bone_name(name):
@@ -12,6 +14,20 @@ def clean_export_bone_name(name):
     collapses left/right bones into one joint hash and corrupts the export.
     """
     return _NUMERIC_SUFFIX.sub('', name)
+
+
+def sanitize_illegal_chars(name):
+    """Replace every character that isn't a letter, digit, or underscore with '_'.
+
+    Skeletons imported from FBX/other games often carry names like
+    'bip001-pelvis' or 'Bip001 Spine' (dashes, spaces). Those characters are
+    ILLEGAL in Maya node names — Maya silently renames them on import, which
+    desyncs the joint hierarchy and changes the bone-name hashes the game and
+    .anm files rely on. Applied consistently across SKL/SKN/ANM so the hashes
+    stay matched. A name that's already clean (typical League bones) is returned
+    unchanged, so this is a no-op for standard skins.
+    """
+    return _ILLEGAL_NAME_CHARS.sub('_', name)
 
 
 def detect_offset_clones(armature_obj):

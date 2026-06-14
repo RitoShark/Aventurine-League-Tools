@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (3, 0, 0),
+    "version": (3, 0, 1),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -10,7 +10,7 @@ bl_info = {
 
 import bpy
 import os
-from bpy.props import StringProperty, BoolProperty, IntProperty, CollectionProperty, EnumProperty
+from bpy.props import StringProperty, BoolProperty, IntProperty, FloatProperty, CollectionProperty, EnumProperty
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from .ui import panels
@@ -706,8 +706,33 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
     
     clean_names: BoolProperty(
         name="Clean Names",
-        description="Remove Blender's .001, .002 suffixes from bone and material names",
+        description="Remove Blender's .001, .002 suffixes AND replace characters that are "
+                    "illegal in Maya/League (dashes, spaces) with underscores. Needed for "
+                    "skeletons imported from FBX/other games (e.g. 'bip001-pelvis'), whose "
+                    "names Maya silently mangles otherwise. No-op for standard League bones",
         default=True
+    )
+
+    apply_object_transform: BoolProperty(
+        name="Apply Object Transform",
+        description="Bake the armature/mesh object's rotation, scale and position into the "
+                    "export so it matches what you see in Blender. Leave on for FBX/external "
+                    "rigs whose up-axis correction lives in the object transform — turning it "
+                    "off exports armature-local data and can ship the model rotated/mis-scaled. "
+                    "No-op when the object is already at identity",
+        default=True
+    )
+
+    model_scale: FloatProperty(
+        name="Scale",
+        description="Uniform size multiplier for the mesh and skeleton, on top of the normal "
+                    "100x export scale. Keep it matched to the ANM Scale so a shrunk/grown "
+                    "animation and its skeleton stay consistent. Leave at 1.0 normally",
+        default=1.0,
+        min=0.0001,
+        soft_min=0.001,
+        soft_max=100.0,
+        precision=4,
     )
 
     disable_scaling: BoolProperty(
@@ -748,6 +773,8 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
         layout.use_property_decorate = False
         layout.prop(self, "export_skl")
         layout.prop(self, "clean_names")
+        layout.prop(self, "apply_object_transform")
+        layout.prop(self, "model_scale")
         layout.prop(self, "disable_scaling")
         layout.prop(self, "disable_transforms")
         layout.prop(self, "use_visual_pose")
@@ -809,6 +836,8 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
             disable_scaling=self.disable_scaling,
             disable_transforms=self.disable_transforms,
             use_visual_pose=effective_visual_pose,
+            apply_object_transform=self.apply_object_transform,
+            model_scale=self.model_scale,
         )
 
         # Update the stored SKN path so the next export dialog opens at the
@@ -905,6 +934,37 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
         default=True
     )
 
+    clean_names: BoolProperty(
+        name="Clean Names",
+        description="Remove Blender's .001, .002 suffixes AND replace characters that are "
+                    "illegal in Maya/League (dashes, spaces) with underscores. Needed for "
+                    "skeletons imported from FBX/other games (e.g. 'bip001-pelvis'), whose "
+                    "names Maya silently mangles otherwise. No-op for standard League bones",
+        default=True
+    )
+
+    apply_object_transform: BoolProperty(
+        name="Apply Object Transform",
+        description="Bake the armature object's rotation, scale and position into the export "
+                    "so it matches what you see in Blender. Leave on for FBX/external rigs "
+                    "whose up-axis correction lives in the object transform — turning it off "
+                    "exports armature-local data and can ship the skeleton rotated/mis-scaled. "
+                    "No-op when the object is already at identity",
+        default=True
+    )
+
+    model_scale: FloatProperty(
+        name="Scale",
+        description="Uniform size multiplier for the skeleton, on top of the normal 100x "
+                    "export scale. Keep it matched to the SKN and ANM Scale so a shrunk/grown "
+                    "skeleton and its animation stay consistent. Leave at 1.0 normally",
+        default=1.0,
+        min=0.0001,
+        soft_min=0.001,
+        soft_max=100.0,
+        precision=4,
+    )
+
     disable_scaling: BoolProperty(
         name="Disable Scaling",
         description="Disable the 100x scale factor applied during export (exports raw Blender units)",
@@ -924,6 +984,17 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
     )
 
     target_armature_name: StringProperty(options={'HIDDEN'})
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = False
+        layout.prop(self, "clean_names")
+        layout.prop(self, "apply_object_transform")
+        layout.prop(self, "model_scale")
+        layout.prop(self, "disable_scaling")
+        layout.prop(self, "disable_transforms")
+        layout.prop(self, "use_visual_pose")
 
     def invoke(self, context, event):
         # Try to get stored path from armature
@@ -954,7 +1025,7 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
     def execute(self, context):
         from .io import export_skl
         target_armature = context.scene.objects.get(self.target_armature_name) if self.target_armature_name else None
-        return export_skl.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms, use_visual_pose=self.use_visual_pose)
+        return export_skl.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms, use_visual_pose=self.use_visual_pose, clean_names=self.clean_names, apply_object_transform=self.apply_object_transform, model_scale=self.model_scale)
 
 # Export operator for ANM
 class ExportANM(bpy.types.Operator, ExportHelper):
@@ -1003,6 +1074,37 @@ class ExportANM(bpy.types.Operator, ExportHelper):
         default=True
     )
 
+    clean_names: BoolProperty(
+        name="Clean Names",
+        description="Replace characters illegal in Maya/League (dashes, spaces) in bone names "
+                    "with underscores, so the animation's track hashes match a Clean-Names SKL. "
+                    "Keep this matched to the SKN/SKL export setting. No-op for standard League bones",
+        default=True
+    )
+
+    apply_object_transform: BoolProperty(
+        name="Apply Object Transform",
+        description="Bake the armature object's rotation, scale and position into the animation, "
+                    "matching the SKN/SKL export. Required for FBX/external rigs whose up-axis "
+                    "correction and unit scale live in the object transform — without it the "
+                    "animation plays rotated and mis-scaled even when the SKL/SKN are correct. "
+                    "Keep this matched to the SKN/SKL setting. No-op when the object is at identity",
+        default=True
+    )
+
+    anim_scale: FloatProperty(
+        name="Scale",
+        description="Extra manual multiplier on the animation's translations, on top of the "
+                    "normal 100x export scale and any object transform. Leave at 1.0 normally; "
+                    "use it for one-off fixes (e.g. an animation that comes in 20%% too big — "
+                    "set 0.8)",
+        default=1.0,
+        min=0.0001,
+        soft_min=0.001,
+        soft_max=100.0,
+        precision=4,
+    )
+
     target_armature_name: StringProperty(options={'HIDDEN'})
 
     @staticmethod
@@ -1040,6 +1142,9 @@ class ExportANM(bpy.types.Operator, ExportHelper):
         layout = self.layout
         layout.use_property_split = False
         layout.use_property_decorate = False
+        layout.prop(self, "clean_names")
+        layout.prop(self, "apply_object_transform")
+        layout.prop(self, "anim_scale")
         layout.prop(self, "disable_scaling")
         layout.prop(self, "disable_transforms")
         layout.prop(self, "batch_export_all_actions")
@@ -1078,7 +1183,7 @@ class ExportANM(bpy.types.Operator, ExportHelper):
         from .io import export_anm
         target_armature = context.scene.objects.get(self.target_armature_name) if self.target_armature_name else None
         if not self.batch_export_all_actions:
-            return export_anm.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms, flip=self.flip, use_scene_range=self.use_scene_range)
+            return export_anm.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms, flip=self.flip, use_scene_range=self.use_scene_range, clean_names=self.clean_names, anim_scale=self.anim_scale, apply_object_transform=self.apply_object_transform)
 
         if not target_armature:
             target_armature = context.active_object if context.active_object and context.active_object.type == 'ARMATURE' else None
@@ -1126,6 +1231,9 @@ class ExportANM(bpy.types.Operator, ExportHelper):
                         disable_scaling=self.disable_scaling,
                         disable_transforms=self.disable_transforms,
                         flip=self.flip,
+                        clean_names=self.clean_names,
+                        anim_scale=self.anim_scale,
+                        apply_object_transform=self.apply_object_transform,
                     )
                     exported_count += 1
                 except Exception as e:

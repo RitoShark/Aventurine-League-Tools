@@ -7,7 +7,7 @@ from ..utils.binary_utils import BinaryStream, Hash
 from . import import_skl
 from . import bone_utils
 
-def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False, visual_mode=False, use_scene_range=False):
+def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False, visual_mode=False, use_scene_range=False, clean_names=True, anim_scale=1.0, apply_object_transform=True):
     """Write Blender animation to ANM file (Uncompressed v4 format).
 
     Mirrors the unified import math:
@@ -29,6 +29,20 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
     else:
         P = mathutils.Matrix(((-1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
         P_inv = P.inverted()
+
+    # Armature OBJECT transform, folded into ROOT bones only (children's
+    # parent-relative locals are object-transform invariant, so the chain carries
+    # it down). This MUST match export_skl's Apply Object Transform: the SKL bind
+    # folds the object's rotation/scale/position into the root, so an ANM that
+    # doesn't fold the same thing replays the un-folded root over the bind and
+    # rotates/mis-scales the whole character. `pose_bone.matrix` is armature-object
+    # space, so left-multiplying matrix_world lifts the root to world space; the
+    # P conjugation below then converts it to League exactly like the SKL root.
+    # Exact no-op when the object is at identity (every normal League rig).
+    if apply_object_transform:
+        _obj_world = armature_obj.matrix_world.copy()
+    else:
+        _obj_world = None
     
     # Sort bones by original import order (matching SKL export ordering)
     native_bones = []
@@ -376,7 +390,14 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                         parent_mat_safe = mathutils.Matrix.Translation(t) @ r.to_matrix().to_4x4() @ mathutils.Matrix.Diagonal(s_clamped.to_4d())
                         v_local_anim = parent_mat_safe.inverted() @ pbone.matrix
                 else:
-                    v_local_anim = pbone.matrix
+                    # Root bone: lift into world space so the object transform is
+                    # folded in (matches export_skl's root handling). Children's
+                    # locals above are armature-relative, so the object transform
+                    # cancels for them and only the root carries it.
+                    if _obj_world is not None:
+                        v_local_anim = _obj_world @ pbone.matrix
+                    else:
+                        v_local_anim = pbone.matrix
 
                 C_child = corrections[pbone.name]
                 _native_anc = _native_anim_parent.get(pbone.name)
@@ -470,9 +491,13 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                     t = mathutils.Vector((-t.x, t.y, t.z))
                     r = mathutils.Quaternion((r.w, r.x, -r.y, -r.z))
 
-                # Add to palettes (scale translations back to game units)
+                # Add to palettes (scale translations back to game units).
+                # anim_scale is a user multiplier on top of EXPORT_SCALE — lets an
+                # animation be matched to a SKL/SKN exported at a different scale
+                # (e.g. an FBX rig whose object carries a unit scale the SKL folds
+                # in via Apply Object Transform but the ANM does not).
                 scale = 1.0 if disable_scaling else import_skl.EXPORT_SCALE
-                t_id = add_to_vec_palette(t * scale)
+                t_id = add_to_vec_palette(t * scale * anim_scale)
                 s_id = add_to_vec_palette(s)
                 r_id = add_to_quat_palette(r)
                 
@@ -490,6 +515,11 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                     bone_name = pbone.name
                 else:
                     bone_name = bone_utils.clean_export_bone_name(pbone.name)
+                # Match the SKL's joint-name hashes: Clean Names makes the name
+                # Maya/League-legal there too, so the game can resolve each track
+                # to its joint. Must stay in lock-step with export_skl's option.
+                if clean_names:
+                    bone_name = bone_utils.sanitize_illegal_chars(bone_name)
                 h = Hash.elf(bone_name)
 
                 if h not in joint_data:
@@ -679,7 +709,7 @@ def write_anm_from_data(filepath, anm_data, fps=None, disable_scaling=False):
     return True
 
 
-def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False, use_scene_range=True):
+def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False, use_scene_range=True, clean_names=True, anim_scale=1.0, apply_object_transform=True):
     armature_obj = target_armature
 
     if not armature_obj:
@@ -693,7 +723,7 @@ def save(operator, context, filepath, target_armature=None, disable_scaling=Fals
 
     try:
         fps = context.scene.render.fps
-        write_anm(filepath, armature_obj, fps, disable_scaling, disable_transforms, flip, adapt_to_edits=adapt_to_edits, use_scene_range=use_scene_range)
+        write_anm(filepath, armature_obj, fps, disable_scaling, disable_transforms, flip, adapt_to_edits=adapt_to_edits, use_scene_range=use_scene_range, clean_names=clean_names, anim_scale=anim_scale, apply_object_transform=apply_object_transform)
         operator.report({'INFO'}, f"Exported ANM: {filepath}")
         return {'FINISHED'}
     except Exception as e:

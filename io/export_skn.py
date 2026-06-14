@@ -42,7 +42,7 @@ def check_shared_vertices_between_materials(mesh_obj):
     return list(shared_materials)
 
 
-def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, material_index=None, disable_scaling=False, disable_transforms=False, deformed_positions=None, deformed_poly_normals=None):
+def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, material_index=None, disable_scaling=False, disable_transforms=False, deformed_positions=None, deformed_poly_normals=None, apply_object_transform=True, model_scale=1.0):
     """
     Collect geometry data from a single mesh object.
     If material_index is specified, only collect triangles belonging to that material.
@@ -57,9 +57,20 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
     if hasattr(mesh, 'calc_normals_split'):
         mesh.calc_normals_split()
 
-    # Matrix to go from Mesh World to Armature Local
-    world_to_armature = armature_obj.matrix_world.inverted() @ mesh_obj.matrix_world
-    scale = 1.0 if disable_scaling else import_skl.EXPORT_SCALE
+    # Transform taking mesh-local coords into the space we export from.
+    #   apply_object_transform: full WORLD space — keeps the armature object's
+    #     rotation/scale/position, matching what's seen in Blender and what
+    #     export_skl folds into the root bones (kept consistent between the two).
+    #   off: ARMATURE-LOCAL (object transform dropped from both sides). When the
+    #     armature is at identity these are identical, so this is the same result
+    #     for every normal League skin.
+    if apply_object_transform:
+        mesh_matrix = mesh_obj.matrix_world.copy()
+    else:
+        mesh_matrix = armature_obj.matrix_world.inverted() @ mesh_obj.matrix_world
+    world_to_armature = mesh_matrix
+    # model_scale: uniform size multiplier, keep matched to the SKL and ANM Scale.
+    scale = (1.0 if disable_scaling else import_skl.EXPORT_SCALE) * model_scale
 
     # Map vertex groups to SKL bone indices.
     # Exact name match takes priority — weights painted on "X.001" must reach
@@ -201,7 +212,7 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
     }
 
 
-def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disable_scaling=False, disable_transforms=False, use_visual_pose=False):
+def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disable_scaling=False, disable_transforms=False, use_visual_pose=False, apply_object_transform=True, model_scale=1.0):
     """Write multiple Blender meshes to a single SKN file with multiple submeshes"""
 
     if not armature_obj:
@@ -290,7 +301,9 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
                                         disable_scaling=disable_scaling,
                                         disable_transforms=disable_transforms,
                                         deformed_positions=deformed_pos,
-                                        deformed_poly_normals=deformed_norms)
+                                        deformed_poly_normals=deformed_norms,
+                                        apply_object_transform=apply_object_transform,
+                                        model_scale=model_scale)
 
                 if data is None or not data['indices']:
                     continue
@@ -321,7 +334,9 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
                                     disable_scaling=disable_scaling,
                                     disable_transforms=disable_transforms,
                                     deformed_positions=deformed_pos,
-                                    deformed_poly_normals=deformed_norms)
+                                    deformed_poly_normals=deformed_norms,
+                                    apply_object_transform=apply_object_transform,
+                                    model_scale=model_scale)
 
             if data is None or not data['indices']:
                 continue
@@ -688,7 +703,7 @@ def process_animations_visual(operator, context, skn_filepath, armature_obj, dis
     return True
 
 
-def save(operator, context, filepath, export_skl_file=True, clean_names=True, target_armature=None, disable_scaling=False, disable_transforms=False, use_visual_pose=False):
+def save(operator, context, filepath, export_skl_file=True, clean_names=True, target_armature=None, disable_scaling=False, disable_transforms=False, use_visual_pose=False, apply_object_transform=True, model_scale=1.0):
     armature_obj = target_armature
     mesh_objects = []
     
@@ -733,13 +748,14 @@ def save(operator, context, filepath, export_skl_file=True, clean_names=True, ta
             operator.report({'WARNING'},
                             f"'{name}' has an unbaked Pose Mode offset that will NOT export. "
                             f"Use 'Set Offset from Pose' (N-panel) or move it in Edit Mode.")
-        submesh_count, vertex_count = write_skn_multi(filepath, mesh_objects, armature_obj, clean_names, disable_scaling, disable_transforms, use_visual_pose)
+        submesh_count, vertex_count = write_skn_multi(filepath, mesh_objects, armature_obj, clean_names, disable_scaling, disable_transforms, use_visual_pose, apply_object_transform=apply_object_transform, model_scale=model_scale)
         operator.report({'INFO'}, f"Exported SKN: {submesh_count} submeshes, {vertex_count} vertices")
 
         if export_skl_file and armature_obj:
             skl_path = os.path.splitext(filepath)[0] + ".skl"
             from . import export_skl
-            export_skl.write_skl(skl_path, armature_obj, disable_scaling, disable_transforms, use_visual_pose)
+            export_skl.write_skl(skl_path, armature_obj, disable_scaling, disable_transforms, use_visual_pose,
+                                 clean_names=clean_names, apply_object_transform=apply_object_transform, model_scale=model_scale)
             operator.report({'INFO'}, f"Exported matching SKL: {skl_path}")
             
         return {'FINISHED'}

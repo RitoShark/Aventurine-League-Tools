@@ -5,7 +5,8 @@ from ..utils.binary_utils import BinaryStream, Hash
 from . import import_skl
 from . import bone_utils
 
-def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=False, use_visual_pose=False):
+def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=False, use_visual_pose=False,
+              clean_names=True, apply_object_transform=True, model_scale=1.0):
     """Write Blender armature to SKL file (Version 0)"""
 
     # Coordinate conversion matrix P (X-mirror + Y-up to Z-up)
@@ -15,6 +16,18 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
     else:
         P = mathutils.Matrix(((-1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
         P_inv = P.inverted()
+
+    # The armature's OBJECT transform, expressed in League space, prepended onto
+    # every root bone so the exported skeleton matches what's seen in Blender.
+    # Without this the export uses armature-LOCAL matrices and silently drops the
+    # object's rotation/scale/position — which for FBX/external rigs (where the
+    # Y-up→Z-up correction and unit scale live in the object transform) ships the
+    # character rotated/mis-scaled. It is an exact no-op when the object is at
+    # identity (every normal League import), since O_league becomes identity.
+    if apply_object_transform:
+        O_league = P_inv @ armature_obj.matrix_world @ P
+    else:
+        O_league = mathutils.Matrix.Identity(4)
     
     # Get bones sorted by original import order (native bones first, new bones appended)
     bones = armature_obj.pose.bones
@@ -43,11 +56,12 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
         # Strip numeric duplicate suffixes only — non-numeric dot suffixes
         # (Hand.L, Bip01.Spine) are part of the bone's identity.
         clean = bone_utils.clean_export_bone_name(bone_name)
-        if clean == bone_name:
-            return bone_name
         # If the clean base name exists as another bone, keep the full suffix
-        if clean in all_bone_names_in_export:
-            return bone_name
+        if clean != bone_name and clean in all_bone_names_in_export:
+            clean = bone_name
+        # Clean Names also makes the name Maya/League-legal (dashes, spaces -> _).
+        if clean_names:
+            clean = bone_utils.sanitize_illegal_chars(clean)
         return clean
     
     joint_count = len(bone_list)
@@ -206,6 +220,13 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
             parent_global, _ = calc_league_matrix(parent_idx)
             l_mat_global = parent_global @ l_mat_local
         else:
+            # Root bone: fold in the armature's object transform (identity when
+            # apply_object_transform is off or the object is at identity). Its
+            # local IS its global, and descendants chain from it — so doing this
+            # only on roots transforms the whole skeleton while leaving every
+            # child's parent-relative local (which is object-transform invariant)
+            # untouched.
+            l_mat_local = O_league @ l_mat_local
             l_mat_global = l_mat_local
 
         league_matrices[bone_idx] = (l_mat_global, l_mat_local)
@@ -269,8 +290,10 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
             # Local Transform (TRS)
             l_t, l_r, l_s = l_mat_local.decompose()
 
-            # Scale translations back to game units (native_bind_t is at 0.01 scale)
-            scale = 1.0 if disable_scaling else import_skl.EXPORT_SCALE
+            # Scale translations back to game units (native_bind_t is at 0.01 scale).
+            # model_scale is a uniform size multiplier — keep it matched to the SKN
+            # and ANM Scale so a shrunk/grown export stays internally consistent.
+            scale = (1.0 if disable_scaling else import_skl.EXPORT_SCALE) * model_scale
             bs.write_vec3(l_t * scale)
             bs.write_vec3(l_s)
             bs.write_quat(l_r)
@@ -310,7 +333,7 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
         
     return True
 
-def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False, use_visual_pose=False):
+def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False, use_visual_pose=False, clean_names=True, apply_object_transform=True, model_scale=1.0):
     armature_obj = target_armature
 
     if not armature_obj:
@@ -328,7 +351,8 @@ def save(operator, context, filepath, target_armature=None, disable_scaling=Fals
             operator.report({'WARNING'},
                             f"'{name}' has an unbaked Pose Mode offset that will NOT export. "
                             f"Use 'Set Offset from Pose' (N-panel) or move it in Edit Mode.")
-        write_skl(filepath, armature_obj, disable_scaling, disable_transforms, use_visual_pose)
+        write_skl(filepath, armature_obj, disable_scaling, disable_transforms, use_visual_pose,
+                  clean_names=clean_names, apply_object_transform=apply_object_transform, model_scale=model_scale)
         operator.report({'INFO'}, f"Exported SKL: {filepath}")
         return {'FINISHED'}
     except Exception as e:
