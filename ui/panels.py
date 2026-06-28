@@ -144,38 +144,71 @@ class LOL_PT_MainPanel(Panel):
 
 
 class UV_CORNER_PT_panel(Panel):
-    """UV Corner Placement Panel for UV Editor"""
-    bl_label = "UV Corners"
+    """UV Tools Panel for the UV/Image Editor"""
+    bl_label = "UV Tools"
     bl_idname = "IMAGE_EDITOR_PT_uv_corners"
     bl_space_type = 'IMAGE_EDITOR'
     bl_region_type = 'UI'
-    bl_category = 'UV Corners'
-    
+    bl_category = 'UV Tools'
+
     @classmethod
     def poll(cls, context):
         # Only show in UV editing mode (Image Editor)
-        return (context.space_data and 
+        return (context.space_data and
                 context.space_data.type == 'IMAGE_EDITOR' and
-                context.active_object and 
+                context.active_object and
                 context.active_object.type == 'MESH' and
                 context.active_object.data.uv_layers.active)
-    
+
     def draw(self, context):
         layout = self.layout
-        
-        # Corner buttons in a 2x2 grid with corner symbols
-        col = layout.column(align=True)
-        
-        # Top row
+        props = context.scene.lol_uv_transform
+
+        # --- Move ------------------------------------------------------------
+        box = layout.box()
+        box.label(text="Move", icon='ARROW_LEFTRIGHT')
+        box.prop(props, "move_amount", text="Amount")
+        # Directional 3x3 grid with diagonals (NW N NE / W . E / SW S SE).
+        # Blender has no diagonal arrow icons, so corners use Unicode arrows.
+        col = box.column(align=True)
         row = col.row(align=True)
-        # Top Left - corner symbol ◸
+        row.operator("uv.lol_move_directional", text="↖").direction = 'UP_LEFT'
+        row.operator("uv.lol_move_directional", text="", icon='TRIA_UP').direction = 'UP'
+        row.operator("uv.lol_move_directional", text="↗").direction = 'UP_RIGHT'
+        row = col.row(align=True)
+        row.operator("uv.lol_move_directional", text="", icon='TRIA_LEFT').direction = 'LEFT'
+        row.label(text="")
+        row.operator("uv.lol_move_directional", text="", icon='TRIA_RIGHT').direction = 'RIGHT'
+        row = col.row(align=True)
+        row.operator("uv.lol_move_directional", text="↙").direction = 'DOWN_LEFT'
+        row.operator("uv.lol_move_directional", text="", icon='TRIA_DOWN').direction = 'DOWN'
+        row.operator("uv.lol_move_directional", text="↘").direction = 'DOWN_RIGHT'
+
+        # --- Rotate ----------------------------------------------------------
+        box = layout.box()
+        box.label(text="Rotate", icon='FILE_REFRESH')
+        box.prop(props, "rotate_degrees", text="Angle")
+        row = box.row(align=True)
+        row.operator("uv.lol_rotate", text="CCW", icon='LOOP_BACK').direction = 'CCW'
+        row.operator("uv.lol_rotate", text="CW", icon='LOOP_FORWARDS').direction = 'CW'
+
+        # --- Scale -----------------------------------------------------------
+        box = layout.box()
+        box.label(text="Scale", icon='FULLSCREEN_ENTER')
+        box.prop(props, "scale_factor", text="Factor")
+        row = box.row(align=True)
+        row.operator("uv.lol_scale", text="U").axis = 'U'
+        row.operator("uv.lol_scale", text="V").axis = 'V'
+        row.operator("uv.lol_scale", text="Both").axis = 'BOTH'
+        box.prop(props, "prevent_negative_scale")
+
+        # --- Corners (snap to corner at half size) --------------------------
+        box = layout.box()
+        box.label(text="Corners", icon='MESH_PLANE')
+        col = box.column(align=True)
+        row = col.row(align=True)
         row.operator("uv.corner_top_left", text="◸", icon='NONE')
-        # Top Right - corner symbol ◹
         row.operator("uv.corner_top_right", text="◹", icon='NONE')
-        
-        # Bottom row
         row = col.row(align=True)
-        # Bottom Left - corner symbol ◺
         row.operator("uv.corner_bottom_left", text="◺", icon='NONE')
-        # Bottom Right - corner symbol ◿
         row.operator("uv.corner_bottom_right", text="◿", icon='NONE')

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (3, 0, 1),
+    "version": (3, 1, 0),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -1327,10 +1327,8 @@ def register():
     
     # Register ported operators
     bpy.utils.register_class(limit_influences.LOLLeagueLimitInfluences_V4)
-    bpy.utils.register_class(uv_corners.UV_CORNER_OT_top_left)
-    bpy.utils.register_class(uv_corners.UV_CORNER_OT_top_right)
-    bpy.utils.register_class(uv_corners.UV_CORNER_OT_bottom_left)
-    bpy.utils.register_class(uv_corners.UV_CORNER_OT_bottom_right)
+    # UV tools: property group + move/scale/rotate/corner operators
+    uv_corners.register()
     
     # Register normals operators
     bpy.utils.register_class(normals.MESH_OT_show_normals)
@@ -1486,10 +1484,7 @@ def unregister():
     
     # Unregister ported operators
     bpy.utils.unregister_class(limit_influences.LOLLeagueLimitInfluences_V4)
-    bpy.utils.unregister_class(uv_corners.UV_CORNER_OT_top_left)
-    bpy.utils.unregister_class(uv_corners.UV_CORNER_OT_top_right)
-    bpy.utils.unregister_class(uv_corners.UV_CORNER_OT_bottom_left)
-    bpy.utils.unregister_class(uv_corners.UV_CORNER_OT_bottom_right)
+    uv_corners.unregister()
     
     # Unregister normals operators
     bpy.utils.unregister_class(normals.MESH_OT_show_normals)
