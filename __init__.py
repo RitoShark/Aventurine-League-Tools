@@ -664,21 +664,33 @@ class ImportMAPGEO(bpy.types.Operator, ImportHelper):
                                   import_textures=self.import_textures)
 
 
-# Placeholder until the mapgeo exporter ships — owns the bl_idname so UI code
-# doesn't change when it does
-class ExportMAPGEO(bpy.types.Operator):
+def _mapgeo_version_items(self, context):
+    from .io import import_mapgeo
+    return [(str(v), f"v{v}", "") for v in import_mapgeo.SUPPORTED_VERSIONS]
+
+
+class ExportMAPGEO(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.mapgeo"
     bl_label = "Export MAPGEO"
-    bl_description = "Coming soon"
-    bl_options = {'INTERNAL'}
+    bl_description = ("Export the active collection's map meshes as a League of Legends map "
+                      "(.mapgeo). Bucket-grid spatial culling is written disabled")
+    bl_options = {'PRESET', 'UNDO'}
 
-    @classmethod
-    def poll(cls, context):
-        cls.poll_message_set("Coming soon")
-        return False
+    filename_ext = ".mapgeo"
+    filter_glob: StringProperty(default="*.mapgeo", options={'HIDDEN'})
+
+    version: EnumProperty(name="Version", description="Target mapgeo format version",
+                         items=_mapgeo_version_items)
+
+    def invoke(self, context, event):
+        stored = context.scene.get('mapgeo_version')
+        if stored is not None:
+            self.version = str(stored)
+        return super().invoke(context, event)
 
     def execute(self, context):
-        return {'CANCELLED'}
+        from .io import export_mapgeo
+        return export_mapgeo.save(self, context, self.filepath, version=int(self.version))
 
 
 # Export operator for SKN
@@ -1283,6 +1295,9 @@ def menu_func_export_scb(self, context):
 def menu_func_export_sco(self, context):
     self.layout.operator(export_sco.ExportSCO.bl_idname, text="League of Legends SCO (.sco)")
 
+def menu_func_export_mapgeo(self, context):
+    self.layout.operator(ExportMAPGEO.bl_idname, text="League of Legends Map (.mapgeo)")
+
 # Registration
 def register():
     icons.register()
@@ -1361,6 +1376,7 @@ def register():
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_anm)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_scb)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_sco)
+    bpy.types.TOPBAR_MT_file_export.append(menu_func_export_mapgeo)
     
     # Register history
     bpy.utils.register_class(history.LOLHistoryItem)
@@ -1515,6 +1531,7 @@ def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_anm)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_scb)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_sco)
+    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_mapgeo)
     
     # Unregister history
     bpy.utils.unregister_class(history.LOLHistoryItem)
