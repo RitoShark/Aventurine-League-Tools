@@ -148,6 +148,39 @@ class ExportSCB(Operator, ExportHelper):
             print(f"[export_scb] WARNING: Could not read riot.scb: {e}")
             return None
     
+    def collect_vertex_colors(self, mesh, vertex_count):
+        """Return a per-vertex list of (r, g, b, a) bytes (0-255), or None.
+
+        SCB stores exactly one color per vertex. A POINT-domain color
+        attribute maps directly; a CORNER (per-loop) attribute is reduced to
+        per-vertex by taking the first loop that touches each vertex.
+        """
+        if not mesh.color_attributes:
+            return None
+
+        ca = mesh.color_attributes.active_color or mesh.color_attributes[0]
+
+        def to_bytes(col):
+            return tuple(max(0, min(255, int(round(c * 255.0)))) for c in
+                         (col[0], col[1], col[2], col[3]))
+
+        if ca.domain == 'POINT':
+            if len(ca.data) != vertex_count:
+                return None
+            return [to_bytes(ca.data[i].color) for i in range(vertex_count)]
+
+        if ca.domain == 'CORNER':
+            colors = [None] * vertex_count
+            for poly in mesh.polygons:
+                for loop_idx in poly.loop_indices:
+                    vi = mesh.loops[loop_idx].vertex_index
+                    if colors[vi] is None:
+                        colors[vi] = to_bytes(ca.data[loop_idx].color)
+            # Fill any unreferenced vertices with opaque white
+            return [c if c is not None else (255, 255, 255, 255) for c in colors]
+
+        return None
+
     def export_scb(self, context, obj, filepath, scale_factor, riot_data):
         """Export mesh to SCB format"""
         mesh = obj.data
@@ -164,16 +197,21 @@ class ExportSCB(Operator, ExportHelper):
             world_pos = eval_obj.matrix_world @ v.co
             vertices_world.append(world_pos)
         
-        # Calculate central point: object origin in world space (pivot point)
-        # This matches Maya: transform.getTranslation(MSpace.kTransform)
-        if riot_data:
-            # If we have riot data, we could use it, but let's use object origin for consistency
-            origin_world = eval_obj.matrix_world.translation
-            central_world = origin_world
+        # Determine central point (Blender space, unscaled). Priority:
+        #   1. riot.scb reference (raw file coords -> Blender space)
+        #   2. central stashed on the object at import time
+        #   3. object origin in world space (pivot point) as a last resort
+        # Storing absolute vertices (below) means the central never shifts the
+        # geometry/bbox; this only controls the locator, so preserving the
+        # original value keeps round-trips faithful.
+        if riot_data and riot_data.get('central') is not None:
+            rc = riot_data['central']  # raw file coords (cx, cy, cz)
+            central_world = Vector((-rc.x, -rc.z, rc.y))
+        elif 'lol_scb_central' in obj:
+            c = obj['lol_scb_central']
+            central_world = Vector((c[0], c[1], c[2]))
         else:
-            # Object origin in world space = pivot point location
-            origin_world = eval_obj.matrix_world.translation
-            central_world = origin_world
+            central_world = eval_obj.matrix_world.translation
         
         # Scale to SCB units (before coordinate transform)
         vertices_scaled = [v * scale_factor for v in vertices_world]
@@ -261,7 +299,13 @@ class ExportSCB(Operator, ExportHelper):
             scb_flag = riot_data['scb_flag']
         elif 'lol_scb_flag' in obj:
             scb_flag = obj['lol_scb_flag']
-        
+
+        # Collect per-vertex colors if the mesh carries them, so we can
+        # round-trip vertex_type=1 meshes instead of always writing type 0.
+        # Vertices were built in eval_mesh.vertex order (triangulation keeps
+        # vertex indices), so a POINT-domain color attribute aligns 1:1.
+        vertex_colors = self.collect_vertex_colors(eval_mesh, len(vertices))
+
         # Write SCB file
         with open(filepath, 'wb') as f:
             # Write magic
@@ -293,13 +337,18 @@ class ExportSCB(Operator, ExportHelper):
             f.write(struct.pack('<6f', min_bb.x, min_bb.y, min_bb.z, 
                                max_bb.x, max_bb.y, max_bb.z))
             
-            # Write vertex type (0 = no vertex colors)
-            f.write(struct.pack('<I', 0))
-            
+            # Write vertex type (1 = per-vertex colors present, else 0)
+            f.write(struct.pack('<I', 1 if vertex_colors else 0))
+
             # Write vertices (Y and Z are already swapped)
             for v in vertices:
                 f.write(struct.pack('<fff', v.x, v.y, v.z))
-            
+
+            # Write per-vertex colors (BGRA bytes) when present
+            if vertex_colors:
+                for r, g, b, a in vertex_colors:
+                    f.write(struct.pack('<4B', b, g, r, a))
+
             # Write central point (Y and Z are already swapped)
             f.write(struct.pack('<fff', central.x, central.y, central.z))
             

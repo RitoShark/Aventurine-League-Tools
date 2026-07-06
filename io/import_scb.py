@@ -38,10 +38,14 @@ def read_scb(filepath):
             x, y, z = struct.unpack('<fff', f.read(12))
             # Match current project SKN coords: (-x, -z, y)
             vertices.append(mathutils.Vector((-x, -z, y)))
-        
-        # Skip vertex colors if present
+
+        # Read per-vertex colors if present (stored BGRA, one per vertex).
+        # Convert to RGBA floats 0-1 to match project convention (see import_mapgeo).
+        colors = []
         if vertex_type == 1:
-            f.seek(4 * vertex_count, 1)
+            for i in range(vertex_count):
+                b, g, r, a = struct.unpack('<4B', f.read(4))
+                colors.append((r / 255.0, g / 255.0, b / 255.0, a / 255.0))
         
         # Read central point
         cx, cy, cz = struct.unpack('<fff', f.read(12))
@@ -82,6 +86,7 @@ def read_scb(filepath):
         'vertices': vertices,
         'indices': indices,
         'uvs': uvs,
+        'colors': colors,
         'material': material or 'lambert69',
         'central': central,
         'scb_flag': scb_flag
@@ -125,11 +130,18 @@ def create_mesh(scb_data):
             uv = face_uv[loop_idx]
             uv_layer.data[loop].uv = (uv.x, 1.0 - uv.y) # Flip V
             
+    # Per-vertex colors (POINT domain, indexed by vertex like the SCB file)
+    colors = scb_data.get('colors')
+    if colors and len(colors) == len(vertices):
+        ca = mesh.color_attributes.new('Color', 'FLOAT_COLOR', 'POINT')
+        flat = [c for col in colors for c in col]
+        ca.data.foreach_set('color', flat)
+
     # Material
     mat = bpy.data.materials.new(name=scb_data['material'])
     mat.use_nodes = True
     mesh.materials.append(mat)
-    
+
     return mesh
 
 def load(operator, context, filepath):
@@ -143,6 +155,12 @@ def load(operator, context, filepath):
         # Store import path for export convenience
         obj["lol_scb_filepath"] = filepath
         obj["lol_scb_filename"] = os.path.basename(filepath)
+
+        # Preserve central point (Blender space) and flag so export round-trips
+        # them instead of resetting the locator to the object origin.
+        central = scb_data['central']
+        obj["lol_scb_central"] = [central.x, central.y, central.z]
+        obj["lol_scb_flag"] = scb_data['scb_flag']
         
         # Set active
         context.view_layer.objects.active = obj
