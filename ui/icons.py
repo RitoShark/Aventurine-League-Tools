@@ -17,6 +17,7 @@ def register():
     pcoll.load("icon_52", os.path.join(icons_dir, "52.png"), 'IMAGE')
     pcoll.load("icon_53", os.path.join(icons_dir, "53.png"), 'IMAGE')
     pcoll.load("icon_54", os.path.join(icons_dir, "54.png"), 'IMAGE')
+    pcoll.load("icon_55", os.path.join(icons_dir, "55.png"), 'IMAGE')
 
     preview_collections["main"] = pcoll
 

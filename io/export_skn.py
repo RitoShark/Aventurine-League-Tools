@@ -365,14 +365,40 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
     if len(submesh_data) > 32:
         raise Exception(f"Too many submeshes/materials: {len(submesh_data)}, max allowed: 32. Reduce number of materials.")
 
-    # Vertex bone indices are stored as uint8 — weights may only reference the
-    # first 256 bones. Large external rigs exceed this silently otherwise.
-    max_inf = max((i for sm in submesh_data for v in sm['vertices'] for i in v['inf']), default=0)
-    if max_inf > 255:
+    # SKN vertex influence bytes are indices into a per-mesh bone PALETTE (the
+    # SKL "influences" table), NOT raw skeleton bone indices.  The engine reads
+    # influences[byte] -> real joint index, so the skeleton may hold up to 65535
+    # bones while a single SKN weights up to 256 distinct ones.  Writing the raw
+    # joint index (as the old code did) overflows the uint8 the moment any
+    # weighted bone sits past index 255 — even if the mesh only touches a few
+    # hundred bones out of a larger rig.  Build the palette from the bones the
+    # mesh actually uses, then remap every vertex to compact palette indices.
+    #
+    # Only slots carrying weight define a used bone.  Padding slots of verts with
+    # <4 influences hold (bone 0, weight 0); they must not inflate the palette
+    # and are remapped to a harmless in-range 0 below.
+    used_joints = set()
+    for sm in submesh_data:
+        for v in sm['vertices']:
+            for bone_idx, w in zip(v['inf'], v['weight']):
+                if w > 0:
+                    used_joints.add(bone_idx)
+
+    influences = sorted(used_joints)  # palette index -> real joint index
+    if len(influences) > 256:
         raise Exception(
-            f"SKN format supports at most 256 weighted bones: vertex weights reference "
-            f"bone index {max_inf}. Reduce the skeleton or remove weights on high-index bones."
+            f"SKN format supports at most 256 bones influencing one mesh, but its "
+            f"vertices are weighted to {len(influences)} distinct bones. Reduce the "
+            f"number of bones the mesh is weighted to (only weighted bones count — "
+            f"the full skeleton may still exceed this)."
         )
+
+    joint_to_palette = {joint_idx: pi for pi, joint_idx in enumerate(influences)}
+    # Remap each vertex's influence bytes from real joint index -> palette index.
+    for sm in submesh_data:
+        for v in sm['vertices']:
+            v['inf'] = [joint_to_palette[b] if w > 0 else 0
+                        for b, w in zip(v['inf'], v['weight'])]
 
     # Write to file
     with open(filepath, 'wb') as f:
@@ -400,8 +426,8 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
                 bs.write_float(*v['weight'])
                 bs.write_vec3(v['normal'])
                 bs.write_vec2(v['uv'])
-                
-    return len(submesh_data), total_vertex_count
+
+    return len(submesh_data), total_vertex_count, influences
 
 
 def fix_custom_bone_parenting(armature_obj):
@@ -748,14 +774,15 @@ def save(operator, context, filepath, export_skl_file=True, clean_names=True, ta
             operator.report({'WARNING'},
                             f"'{name}' has an unbaked Pose Mode offset that will NOT export. "
                             f"Use 'Set Offset from Pose' (N-panel) or move it in Edit Mode.")
-        submesh_count, vertex_count = write_skn_multi(filepath, mesh_objects, armature_obj, clean_names, disable_scaling, disable_transforms, use_visual_pose, apply_object_transform=apply_object_transform, model_scale=model_scale)
-        operator.report({'INFO'}, f"Exported SKN: {submesh_count} submeshes, {vertex_count} vertices")
+        submesh_count, vertex_count, skn_influences = write_skn_multi(filepath, mesh_objects, armature_obj, clean_names, disable_scaling, disable_transforms, use_visual_pose, apply_object_transform=apply_object_transform, model_scale=model_scale)
+        operator.report({'INFO'}, f"Exported SKN: {submesh_count} submeshes, {vertex_count} vertices, {len(skn_influences)} bone influences")
 
         if export_skl_file and armature_obj:
             skl_path = os.path.splitext(filepath)[0] + ".skl"
             from . import export_skl
             export_skl.write_skl(skl_path, armature_obj, disable_scaling, disable_transforms, use_visual_pose,
-                                 clean_names=clean_names, apply_object_transform=apply_object_transform, model_scale=model_scale)
+                                 clean_names=clean_names, apply_object_transform=apply_object_transform, model_scale=model_scale,
+                                 influences=skn_influences)
             operator.report({'INFO'}, f"Exported matching SKL: {skl_path}")
             
         return {'FINISHED'}

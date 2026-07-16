@@ -18,6 +18,19 @@ _DEFAULT_ELEMENT_ORDER = (
     (mg.ELEM_TEXCOORD7, 1),
 )
 
+# Half-float ("Use Half Float") swaps these elements to their 16-bit packed formats,
+# matching what Riot's own files and lol_maya/pyRitoFile do: position stays float32
+# (large maps need the precision), normals and UVs shrink to halves.
+_HALF_FLOAT_FORMAT = {
+    mg.ELEM_NORMAL: 8,     # XYZ_Packed161616
+    mg.ELEM_TEXCOORD0: 7,  # XY_Packed1616
+    mg.ELEM_TEXCOORD7: 7,  # XY_Packed1616
+}
+
+# Riot hard limits — exceeding either corrupts the file or crashes the map in-game.
+_MAX_VERTICES = 65536   # indices are u16, so the highest valid index is 65535
+_MAX_SUBMESHES = 64
+
 
 class _Writer:
     __slots__ = ('chunks',)
@@ -231,14 +244,25 @@ def _build_submeshes(mesh, tri_mat, new_tris):
     return submeshes
 
 
-def _default_declaration(available):
-    return [(name_id, fmt_id) for name_id, fmt_id in _DEFAULT_ELEMENT_ORDER if name_id in available]
+def _default_declaration(available, half_float=False):
+    order = []
+    for name_id, fmt_id in _DEFAULT_ELEMENT_ORDER:
+        if name_id not in available:
+            continue
+        if half_float:
+            fmt_id = _HALF_FLOAT_FORMAT.get(name_id, fmt_id)
+        order.append((name_id, fmt_id))
+    return order
 
 
-def _resolve_declaration(obj, available):
+def _resolve_declaration(obj, available, half_float=False):
+    # A mesh imported from a real map carries its original layout in the cached
+    # declaration; respect it as-is (it already matches how Riot packed it, so we
+    # never silently downgrade its precision). Half-float only shapes meshes built
+    # from scratch, which fall through to the default layout below.
     cached = _mapgeo_prop(obj, 'vertex_declarations')
     if not cached:
-        return [_default_declaration(available)]
+        return [_default_declaration(available, half_float)]
     streams = []
     for stream in cached:
         elems = []
@@ -272,12 +296,19 @@ def _encode_vertex_buffer(elements, sources, n):
     return arr.tobytes()
 
 
-def _build_model(obj, s):
+def _build_model(obj, s, half_float=False):
     mesh = obj.data
     geometry = _build_mesh_geometry(mesh)
     if geometry is None:
         return None
     new_tris, file_tris, src_vertex_of_new, first_loop_of_new, uv0, lightmap_uv, tri_mat = geometry
+
+    n = len(src_vertex_of_new)
+    if n > _MAX_VERTICES:
+        raise ValueError(
+            f"{obj.name}: {n} vertices after splitting exceeds the {_MAX_VERTICES - 1} limit "
+            "for a single mapgeo mesh (indices are 16-bit). Split the mesh into smaller pieces "
+            "and re-export.")
 
     positions_bl = _gather_positions(mesh)[src_vertex_of_new]
     normals_bl = _gather_normals(mesh)[src_vertex_of_new]
@@ -313,11 +344,16 @@ def _build_model(obj, s):
         sources[mg.ELEM_TEXCOORD5] = tc5[src_vertex_of_new]
         available.add(mg.ELEM_TEXCOORD5)
 
-    streams = _resolve_declaration(obj, available)
-    n = len(src_vertex_of_new)
+    streams = _resolve_declaration(obj, available, half_float)
     vertex_buffers = [_encode_vertex_buffer(elems, sources, n) for elems in streams]
 
     positions_league = sources[mg.ELEM_POSITION]
+
+    submeshes = _build_submeshes(mesh, tri_mat, new_tris)
+    if len(submeshes) > _MAX_SUBMESHES:
+        raise ValueError(
+            f"{obj.name}: {len(submeshes)} materials assigned exceeds the {_MAX_SUBMESHES}-material "
+            "limit for a single mapgeo mesh. Merge materials or split the mesh and re-export.")
 
     hash_str = _mapgeo_prop(obj, 'visibility_controller_hash', '0')
     unk_v18_str = _mapgeo_prop(obj, 'unk_v18_hash', '0')
@@ -328,7 +364,7 @@ def _build_model(obj, s):
         'streams': streams,
         'vertex_buffers': vertex_buffers,
         'indices': file_tris.astype('<u2'),
-        'submeshes': _build_submeshes(mesh, tri_mat, new_tris),
+        'submeshes': submeshes,
         'layer': int(_mapgeo_prop(obj, 'layer', 0xFF)) & 0xFF,
         'quality': int(_mapgeo_prop(obj, 'quality', 0x1F)) & 0xFF,
         'render_flags': int(_mapgeo_prop(obj, 'render_flags', 0)),
@@ -493,7 +529,40 @@ def _collect_mesh_objects(collection):
     return objects
 
 
-def write_mapgeo(context, collection, version, filepath):
+def _source_trailing_bytes(context, version):
+    """Bucket grids + planar reflectors verbatim from the originally imported file.
+
+    Riot's bucket grids are self-contained (own vertices/indices; buckets index into
+    their own arrays), so copying them straight from the source stays valid even after
+    the render meshes are re-split or edited. A naked/disabled grid can crash the map
+    in-game, so preserving the original is the safe default (matches lemon3d/lol_maya).
+
+    Only valid when the export version matches the source's, since the trailing layout
+    is version-dependent. Returns the raw bytes, or None to fall back to a disabled grid.
+    """
+    import os
+
+    src = context.scene.get('mapgeo_source')
+    offset = context.scene.get('mapgeo_trailing_offset')
+    src_version = context.scene.get('mapgeo_version')
+    if not src or offset is None or src_version is None:
+        return None
+    if int(src_version) != int(version):
+        return None
+    if not os.path.isfile(src):
+        return None
+    with open(src, 'rb') as f:
+        data = f.read()
+    if data[:4] != mg.MAPGEO_MAGIC or struct.unpack_from('<I', data, 4)[0] != version:
+        return None
+    offset = int(offset)
+    if offset <= 0 or offset > len(data):
+        return None
+    return data[offset:]
+
+
+def write_mapgeo(context, collection, version, filepath, bucket_grid_mode='ORIGINAL',
+                 use_half_float=False):
     from . import import_skl
 
     s = import_skl.IMPORT_SCALE
@@ -501,7 +570,7 @@ def write_mapgeo(context, collection, version, filepath):
     separate_point_lights = version < 7 and bool(context.scene.get('mapgeo_separate_point_lights', False))
 
     objects = _collect_mesh_objects(collection)
-    models = [m for m in (_build_model(obj, s) for obj in objects) if m is not None]
+    models = [m for m in (_build_model(obj, s, use_half_float) for obj in objects) if m is not None]
     if not models:
         raise ValueError('No exportable mesh objects found in the target collection')
 
@@ -545,18 +614,25 @@ def write_mapgeo(context, collection, version, filepath):
     for model, (desc_id, vb_ids, ib_id) in zip(models, model_bufs):
         _write_model(writer, model, version, vb_ids, desc_id, ib_id, separate_point_lights)
 
-    all_min = np.min([m['bbox_min'] for m in models], axis=0)
-    all_max = np.max([m['bbox_max'] for m in models], axis=0)
-    _write_scene_graphs(writer, version, all_min, all_max)
-    _write_planar_reflectors(writer, version)
+    trailing = _source_trailing_bytes(context, version) if bucket_grid_mode == 'ORIGINAL' else None
+    if trailing is not None:
+        writer.raw(trailing)
+        trailing_mode = 'original'
+    else:
+        all_min = np.min([m['bbox_min'] for m in models], axis=0)
+        all_max = np.max([m['bbox_max'] for m in models], axis=0)
+        _write_scene_graphs(writer, version, all_min, all_max)
+        _write_planar_reflectors(writer, version)
+        trailing_mode = 'disabled'
 
     with open(filepath, 'wb') as f:
         f.write(writer.getvalue())
 
-    return len(models)
+    return len(models), trailing_mode
 
 
-def save(operator, context, filepath, collection_name=None, version=None):
+def save(operator, context, filepath, collection_name=None, version=None,
+         bucket_grid_mode='ORIGINAL', use_half_float=False):
     import bpy
 
     collection = bpy.data.collections.get(collection_name) if collection_name else None
@@ -570,14 +646,22 @@ def save(operator, context, filepath, collection_name=None, version=None):
         return {'CANCELLED'}
 
     try:
-        count = write_mapgeo(context, collection, export_version, filepath)
+        count, trailing_mode = write_mapgeo(
+            context, collection, export_version, filepath, bucket_grid_mode=bucket_grid_mode,
+            use_half_float=use_half_float)
     except ValueError as e:
         operator.report({'ERROR'}, str(e))
         return {'CANCELLED'}
 
+    if trailing_mode == 'original':
+        tail = ("Original bucket grids and planar reflectors were copied from the "
+                "imported source file.")
+    else:
+        tail = ("Bucket-grid spatial culling is written disabled (all geometry always "
+                "renders): no matching source file to copy the original grids from, so "
+                "the map may not render or cull correctly in-game.")
     operator.report(
         {'INFO'},
         f"Exported {count} map meshes to mapgeo v{export_version} from collection "
-        f"'{collection.name}'. Bucket-grid spatial culling is written disabled (all "
-        "geometry always renders) since this addon doesn't reconstruct it yet.")
+        f"'{collection.name}'. {tail}")
     return {'FINISHED'}

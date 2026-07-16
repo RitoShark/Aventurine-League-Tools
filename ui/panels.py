@@ -49,15 +49,11 @@ class LOL_PT_MainPanel(Panel):
         row.operator("import_scene.scb", text="Import", icon='IMPORT')
         row.operator("export_scene.scb", text="Export", icon='EXPORT')
         
-        # MAPGEO section (SCO moved out of the N menu — riot phased SCO out;
-        # it stays available under File > Import/Export)
-        box = layout.box()
-        box.label(text="MAPGEO (Map Geometry)", icon='WORLD')
-        row = box.row(align=True)
-        row.scale_y = 1.2
-        row.operator("import_scene.mapgeo", text="Import", icon='IMPORT')
-        row.operator("export_scene.mapgeo", text="Export", icon='EXPORT')
-        
+        # MAPGEO lives in its own toggle-able "Aventurine MapGeo" tab (see
+        # ui/mapgeo_panel.py) — map-making is niche, so it's opt-in via addon settings.
+        # SCO moved out of the N menu too — riot phased SCO out; it stays available
+        # under File > Import/Export.
+
         # Mesh Tools section
         box = layout.box()
         box.label(text="Mesh Tools", icon='MODIFIER')

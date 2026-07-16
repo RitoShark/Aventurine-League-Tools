@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (3, 1, 1),
+    "version": (3, 1, 2),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -15,6 +15,7 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from .ui import panels
 from .ui import icons
+from .ui import mapgeo_panel
 from .tools import updater
 from .tools import limit_influences
 from .tools import uv_corners
@@ -111,6 +112,16 @@ def update_skin_tools(self, context):
     except Exception as e:
         print(f"Error toggling skin tools: {e}")
 
+def update_mapgeo_tools(self, context):
+    """Toggle the dedicated Aventurine MapGeo N-panel tab"""
+    try:
+        if self.enable_mapgeo_tools:
+            mapgeo_panel.register()
+        else:
+            mapgeo_panel.unregister()
+    except Exception as e:
+        print(f"Error toggling mapgeo tools: {e}")
+
 def get_preferences(context):
     return context.preferences.addons[__package__].preferences
 
@@ -165,6 +176,13 @@ class LolAddonPreferences(bpy.types.AddonPreferences):
         description="Enable the Auto Physics panel for automated hair jiggle physics",
         default=True,
         update=update_hair_physics
+    )
+
+    enable_mapgeo_tools: BoolProperty(
+        name="MapGeo Tools",
+        description="Show the 'Aventurine MapGeo' tab for importing/exporting League maps (.mapgeo)",
+        default=False,
+        update=update_mapgeo_tools
     )
 
     direct_drag_drop: BoolProperty(
@@ -282,6 +300,9 @@ class LolAddonPreferences(bpy.types.AddonPreferences):
         sub.prop(self, "enable_anim_loader")
         sub.prop(self, "enable_boobs_physics")
         sub.prop(self, "enable_hair_physics")
+
+        # MapGeo Tools (standalone — niche map-making workflow, off by default)
+        box.prop(self, "enable_mapgeo_tools")
 
         # Drag & Drop Setting
         box.prop(self, "direct_drag_drop")
@@ -673,7 +694,7 @@ class ExportMAPGEO(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.mapgeo"
     bl_label = "Export MAPGEO"
     bl_description = ("Export the active collection's map meshes as a League of Legends map "
-                      "(.mapgeo). Bucket-grid spatial culling is written disabled")
+                      "(.mapgeo). Original bucket grids are copied from the imported source")
     bl_options = {'PRESET', 'UNDO'}
 
     filename_ext = ".mapgeo"
@@ -681,6 +702,12 @@ class ExportMAPGEO(bpy.types.Operator, ExportHelper):
 
     version: EnumProperty(name="Version", description="Target mapgeo format version",
                          items=_mapgeo_version_items)
+
+    use_half_float: BoolProperty(
+        name="Use Half Float",
+        description=("Pack normals and UVs as 16-bit half floats to shrink the file "
+                     "(positions stay full precision). Matches Riot's own compact layout"),
+        default=False)
 
     def invoke(self, context, event):
         stored = context.scene.get('mapgeo_version')
@@ -690,7 +717,8 @@ class ExportMAPGEO(bpy.types.Operator, ExportHelper):
 
     def execute(self, context):
         from .io import export_mapgeo
-        return export_mapgeo.save(self, context, self.filepath, version=int(self.version))
+        return export_mapgeo.save(self, context, self.filepath, version=int(self.version),
+                                  use_half_float=self.use_half_float)
 
 
 # Export operator for SKN
@@ -1440,6 +1468,13 @@ def register():
                 hair_physics.register()
             except Exception as e:
                 print(f"Failed to auto-load hair physics: {e}")
+
+        # MapGeo tab is opt-in (off by default); register only when enabled
+        if prefs.enable_mapgeo_tools:
+            try:
+                mapgeo_panel.register()
+            except Exception as e:
+                print(f"Failed to auto-load mapgeo tools: {e}")
     except:
         pass
 
@@ -1469,6 +1504,10 @@ def unregister():
     try:
         from .extras import hair_physics
         hair_physics.unregister()
+    except: pass
+
+    try:
+        mapgeo_panel.unregister()
     except: pass
 
     # Unregister file handlers for drag-and-drop

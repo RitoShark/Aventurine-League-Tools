@@ -6,8 +6,17 @@ from . import import_skl
 from . import bone_utils
 
 def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=False, use_visual_pose=False,
-              clean_names=True, apply_object_transform=True, model_scale=1.0):
-    """Write Blender armature to SKL file (Version 0)"""
+              clean_names=True, apply_object_transform=True, model_scale=1.0, influences=None):
+    """Write Blender armature to SKL file (Version 0)
+
+    influences: the bone palette the paired SKN's vertex bytes index into, as a
+        list of joint indices (palette index -> joint index).  export_skn passes
+        the mesh's used-bone palette so skeletons with more than 256 joints stay
+        exportable (only the bones a mesh weights count against the 256 cap).
+        When None (standalone SKL export, no mesh) it defaults to identity, i.e.
+        every joint is directly addressable — valid for skeletons up to 65535
+        joints on their own.
+    """
 
     # Coordinate conversion matrix P (X-mirror + Y-up to Z-up)
     if disable_transforms:
@@ -65,6 +74,12 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
         return clean
     
     joint_count = len(bone_list)
+
+    # Bone palette shared with the paired SKN (see docstring). Identity for a
+    # standalone export, otherwise the compact used-bone list from the SKN.
+    if influences is None:
+        influences = list(range(joint_count))
+    influence_count = len(influences)
 
     # --- Pre-calculate Matrices (Recursive) to handle Mix of Native/New bones ---
     # format: [bone_index] = (Matrix_Global_League, Matrix_Local_League)
@@ -246,13 +261,13 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
         
         bs.write_uint16(0) # Flags
         bs.write_uint16(joint_count)
-        bs.write_uint32(joint_count) # Influence count
-        
+        bs.write_uint32(influence_count) # Influence count
+
         # Offsets
         joints_offset = 64
         joint_indices_offset = joints_offset + joint_count * 100
         influences_offset = joint_indices_offset + joint_count * 8
-        joint_names_offset = influences_offset + joint_count * 2
+        joint_names_offset = influences_offset + influence_count * 2
         
         bs.write_int32(joints_offset, joint_indices_offset, influences_offset, 0, 0, joint_names_offset)
         
@@ -323,8 +338,8 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
             bs.write_uint32(Hash.elf(get_export_name(pbone.name)))
             
         bs.seek(influences_offset)
-        for i in range(joint_count):
-            bs.write_uint16(i)
+        for joint_idx in influences:
+            bs.write_uint16(joint_idx)
             
         # 6. Finalize Size
         total_size = bs.tell()
