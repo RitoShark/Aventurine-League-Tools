@@ -58,13 +58,24 @@ def detect_offset_clones(armature_obj):
         target = None
         if len(no_sfx) == 1:
             target = no_sfx[0]
-        else:
-            for b in grp:
-                p = b.parent
-                if (p is not None and p.get("native_bone_index") is not None
-                        and int(p.get("native_bone_index")) == idx):
-                    target = b
-                    break
+        elif len(no_sfx) == 0:
+            # Exotic all-suffixed spliced pair: the canonical is the single bone
+            # whose parent shares the same native index (the deepest of the
+            # pair).  Require it to be unambiguous — MORE than one such bone
+            # means the user duplicated a skeleton bone into several
+            # independently-named new bones (e.g. cape/cloth chains), which is
+            # NOT a clone group and must not be spliced.
+            same_parent = [b for b in grp
+                           if b.parent is not None
+                           and b.parent.get("native_bone_index") is not None
+                           and int(b.parent.get("native_bone_index")) == idx]
+            if len(same_parent) == 1:
+                target = same_parent[0]
+        # len(no_sfx) >= 2: multiple independently-named bones share one native
+        # index — a "duplicated a skeleton bone into new bones" shape (Shift+D
+        # copies the native props), not offset clones.  Abstain so nothing gets
+        # spliced/reparented; find_duplicate_native_index_bones flags them and
+        # LOL_OT_ConvertToNewBone strips the stale props.
         if target is None:
             continue
         for b in grp:
@@ -81,6 +92,66 @@ def detect_offset_clones(armature_obj):
         if target_pb is not None and target_pb.get("native_bone_index") is not None:
             clones[pb.name] = target_pb.name
     return clones
+
+
+def find_duplicate_native_index_bones(armature_obj):
+    """Bones carrying a native_bone_index copied from another bone (Shift+D).
+
+    Blender copies pose-bone custom props when a bone is duplicated, so a
+    duplicate of a skeleton bone inherits the original's native_bone_index and
+    bind data.  When such a duplicate is used as a fresh new bone — a cape,
+    cloth or accessory chain root — that stale index makes the exporter mistake
+    it for the original joint: it re-plants the duplicate onto the original's
+    native bind (collapsing it to the wrong position/orientation) instead of
+    exporting it at its authored placement.
+
+    Returns a list of (bone_name, shared_index, canonical_name) for every stale
+    duplicate that is NOT already handled as a recognised offset clone.  The
+    canonical is the genuine owner of the index — the offset-clone target if
+    there is one, otherwise the bone still sitting in its native hierarchy slot.
+    LOL_OT_ConvertToNewBone strips the stale props from these so they export as
+    real new joints.  A native index owned by a single bone is never flagged.
+    """
+    clones = detect_offset_clones(armature_obj)
+
+    groups = {}
+    for pb in armature_obj.pose.bones:
+        idx = pb.get("native_bone_index")
+        if idx is not None:
+            groups.setdefault(int(idx), []).append(pb)
+
+    flagged = []
+    for idx, grp in groups.items():
+        if len(grp) < 2:
+            continue
+
+        grp_clone_names = {b.name for b in grp if b.name in clones}
+        grp_targets = {clones[n] for n in grp_clone_names}
+
+        canonical = None
+        # 1. The offset-clone target, when this is a recognised clone group.
+        for b in grp:
+            if b.name in grp_targets:
+                canonical = b
+                break
+        # 2. Otherwise the bone still parented under its native parent — the one
+        #    that never moved out of its original skeleton slot.
+        if canonical is None:
+            for b in grp:
+                cur = b.parent.name if b.parent else ""
+                if cur == b.get("native_parent", ""):
+                    canonical = b
+                    break
+        # 3. Fallbacks: a bone without a numeric suffix, else the first.
+        if canonical is None:
+            no_sfx = [b for b in grp if not _NUMERIC_SUFFIX.search(b.name)]
+            canonical = no_sfx[0] if no_sfx else grp[0]
+
+        for b in grp:
+            if b is canonical or b.name in grp_clone_names:
+                continue
+            flagged.append((b.name, idx, canonical.name))
+    return flagged
 
 
 def find_unbaked_pose_offsets(armature_obj):

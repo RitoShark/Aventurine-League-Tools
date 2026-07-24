@@ -366,6 +366,12 @@ def save(operator, context, filepath, target_armature=None, disable_scaling=Fals
             operator.report({'WARNING'},
                             f"'{name}' has an unbaked Pose Mode offset that will NOT export. "
                             f"Use 'Set Offset from Pose' (N-panel) or move it in Edit Mode.")
+        for name, idx, canonical in bone_utils.find_duplicate_native_index_bones(armature_obj):
+            operator.report({'WARNING'},
+                            f"'{name}' is a duplicate of skeleton bone '{canonical}' (shares "
+                            f"native index {idx}) and will NOT export correctly — it collapses "
+                            f"onto '{canonical}'. Select it and click 'Convert to New Bone(s)' "
+                            f"(N-panel > Offset Bones) to export it as a real new bone.")
         write_skl(filepath, armature_obj, disable_scaling, disable_transforms, use_visual_pose,
                   clean_names=clean_names, apply_object_transform=apply_object_transform, model_scale=model_scale)
         operator.report({'INFO'}, f"Exported SKL: {filepath}")

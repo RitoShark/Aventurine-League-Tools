@@ -122,9 +122,91 @@ Children are untouched, and the clone's Scale stays in the pose channel (the sca
         return {'FINISHED'}
 
 
+# Native-skeleton data the importer stamps onto every bone.  A Shift+D
+# duplicate inherits a copy of these; stripping them turns the duplicate back
+# into a plain new bone that exports at its authored placement.
+_STALE_NATIVE_PROPS = (
+    "native_bone_index", "native_bind_t", "native_bind_r", "native_bind_s",
+    "native_global_rest_mat", "native_parent", "native_matrix_local",
+)
+
+
+class LOL_OT_ConvertToNewBone(bpy.types.Operator):
+    """Turn the selected bones into brand-new joints for export.
+
+Use this on bones you built by duplicating (Shift+D) a skeleton bone — cape,
+cloth or accessory chains.  Blender copies the original's hidden native-skeleton
+data onto the duplicate, so the exporter mistakes it for the original joint and
+collapses it onto the original's position/rotation in game.  This strips that
+copied data so the bone exports where you actually placed it.  The genuine
+skeleton bone that owns each index is protected and skipped"""
+    bl_idname = "lol_bone.convert_to_new"
+    bl_label = "Convert to New Bone(s)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and context.active_object.type == 'ARMATURE'
+
+    def execute(self, context):
+        arm = context.active_object
+
+        # Selected bone names, however the user is selecting (Pose or Edit Mode).
+        names = [b.name for b in (context.selected_pose_bones or [])]
+        if not names:
+            names = [b.name for b in (getattr(context, "selected_editable_bones", None) or [])]
+        if not names:
+            names = [b.name for b in (getattr(context, "selected_bones", None) or [])]
+        if not names:
+            self.report({'ERROR'}, "Select the duplicated bone(s) to convert (Pose or Edit Mode)")
+            return {'CANCELLED'}
+
+        # Genuine stale duplicates (safe to convert); the canonical owner of each
+        # native index is deliberately excluded so a real joint is never gutted.
+        convertible = {n for n, _idx, _canon in
+                       bone_utils.find_duplicate_native_index_bones(arm)}
+
+        converted, protected, already = [], [], []
+        for name in sorted(set(names)):
+            pb = arm.pose.bones.get(name)
+            if pb is None:
+                continue
+            if pb.get("native_bone_index") is None:
+                already.append(name)          # already a plain new bone
+                continue
+            if name not in convertible:
+                protected.append(name)         # real skeleton joint — leave it alone
+                continue
+            for key in _STALE_NATIVE_PROPS:
+                if key in pb:
+                    del pb[key]
+            converted.append(name)
+
+        if not converted:
+            if protected:
+                self.report({'WARNING'},
+                            f"Nothing converted — {', '.join(protected)} "
+                            f"{'is a' if len(protected) == 1 else 'are'} real skeleton "
+                            f"joint(s) (the original), not a duplicate. Select the "
+                            f"duplicated bone(s) instead.")
+            elif already:
+                self.report({'INFO'}, f"Already a new bone: {', '.join(already)}. Nothing to do.")
+            else:
+                self.report({'WARNING'}, "No convertible bones in the selection.")
+            return {'CANCELLED'}
+
+        msg = f"Converted {len(converted)} bone(s) to new joints: {', '.join(converted)}"
+        if protected:
+            msg += f"  (skipped real joint(s): {', '.join(protected)})"
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
 def register():
     bpy.utils.register_class(LOL_OT_SetOffsetFromPose)
+    bpy.utils.register_class(LOL_OT_ConvertToNewBone)
 
 
 def unregister():
+    bpy.utils.unregister_class(LOL_OT_ConvertToNewBone)
     bpy.utils.unregister_class(LOL_OT_SetOffsetFromPose)

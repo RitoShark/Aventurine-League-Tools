@@ -120,6 +120,17 @@ class LOL_PT_MainPanel(Panel):
         row.enabled = in_pose_mode
         row.operator("lol_offset.set_from_pose", text="Set Offset from Pose", icon='ORIENTATION_LOCAL')
 
+        # Convert duplicated skeleton bones (Shift+D) into genuine new joints so
+        # cape/cloth/accessory chains export at their authored position instead
+        # of collapsing onto the bone they were copied from.
+        in_bone_edit = bool(context.active_object and
+                            context.active_object.type == 'ARMATURE' and
+                            context.mode in ('POSE', 'EDIT_ARMATURE'))
+        row = box.row(align=True)
+        row.scale_y = 1.2
+        row.enabled = in_bone_edit
+        row.operator("lol_bone.convert_to_new", text="Convert to New Bone(s)", icon='BONE_DATA')
+
         
         # Show metadata if armature is selected
         if context.active_object and context.active_object.type == 'ARMATURE':
