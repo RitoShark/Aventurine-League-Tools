@@ -3,7 +3,7 @@ import mathutils
 import struct
 import os
 import re
-from ..utils.binary_utils import BinaryStream
+from ..utils.format_data import write_skin
 from . import import_skl
 from . import bone_utils
 
@@ -400,32 +400,7 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
             v['inf'] = [joint_to_palette[b] if w > 0 else 0
                         for b, w in zip(v['inf'], v['weight'])]
 
-    # Write to file
-    with open(filepath, 'wb') as f:
-        bs = BinaryStream(f)
-        
-        bs.write_uint32(0x00112233)  # Magic
-        bs.write_uint16(1, 1)  # Major, Minor
-        
-        bs.write_uint32(len(submesh_data))
-        for sm in submesh_data:
-            bs.write_padded_string(sm['name'], 64)
-            bs.write_uint32(sm['vertex_start'], sm['vertex_count'], 
-                           sm['index_start'], sm['index_count'])
-            
-        bs.write_uint32(total_index_count, total_vertex_count)
-        
-        for sm in submesh_data:
-            for idx in sm['indices']:
-                bs.write_uint16(idx)
-                
-        for sm in submesh_data:
-            for v in sm['vertices']:
-                bs.write_vec3(v['pos'])
-                bs.write_uint8(*v['inf'])
-                bs.write_float(*v['weight'])
-                bs.write_vec3(v['normal'])
-                bs.write_vec2(v['uv'])
+    write_skin(filepath, submesh_data)
 
     return len(submesh_data), total_vertex_count, influences
 

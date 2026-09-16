@@ -37,17 +37,17 @@ jobs:
         run: |
           VERSION="${{ steps.current.outputs.version }}"
           BUILD_DIR="/tmp/build/Aventurine"
-          mkdir -p "$BUILD_DIR/native"
+          mkdir -p "$BUILD_DIR"
 
           for f in __init__.py LICENSE README.md THIRD_PARTY_LICENSES.md; do
             [ -f "$f" ] && cp "$f" "$BUILD_DIR/"
           done
 
-          for d in io ui utils extras tools icons; do
+          for d in io ui utils extras tools icons vendor; do
             [ -d "$d" ] && cp -r "$d" "$BUILD_DIR/"
           done
 
-          cp native/*.dll "$BUILD_DIR/native/" 2>/dev/null || true
+          test -f "$BUILD_DIR/vendor/ritoshark/ritoshark.pyd"
 
           find "$BUILD_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 

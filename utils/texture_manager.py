@@ -1,172 +1,27 @@
 import bpy
 import os
 import glob
-import ctypes
+from .backend import require_ritoshark
+from .format_data import materials_from_bin, textures_from_bin
 import numpy as np
 
-# --- Native DLL for TEX to DDS conversion ---
-_tex_dll = None
-_tex_dll_convert = None
-_tex_dll_free = None
-
-def _load_tex_dll():
-    """Load the native TEX converter DLL"""
-    global _tex_dll, _tex_dll_convert, _tex_dll_free
-
-    if _tex_dll is not None:
-        return _tex_dll
-
-    dll_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'native', 'tex_converter.dll')
-    if os.path.exists(dll_path):
-        try:
-            _tex_dll = ctypes.CDLL(dll_path)
-            _tex_dll.tex_to_dds_bytes.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)), ctypes.POINTER(ctypes.c_uint32)]
-            _tex_dll.tex_to_dds_bytes.restype = ctypes.c_int
-            _tex_dll.free_dds_bytes.argtypes = [ctypes.POINTER(ctypes.c_uint8)]
-            _tex_dll.free_dds_bytes.restype = None
-            _tex_dll_convert = _tex_dll.tex_to_dds_bytes
-            _tex_dll_free = _tex_dll.free_dds_bytes
-            return _tex_dll
-        except Exception as e:
-            print(f"Aventurine: Failed to load TEX DLL: {e}")
-            _tex_dll = False
-            return False
-
-    _tex_dll = False
-    return False
-
-def tex_to_dds_bytes(tex_path):
-    """Convert TEX file to DDS bytes using native DLL."""
-    if not _load_tex_dll():
-        raise Exception("Aventurine: TEX DLL not available")
-
-    tex_path_bytes = tex_path.encode('utf-8')
-    out_data = ctypes.POINTER(ctypes.c_uint8)()
-    out_size = ctypes.c_uint32()
-
-    result = _tex_dll_convert(tex_path_bytes, ctypes.byref(out_data), ctypes.byref(out_size))
-    if result != 0:
-        raise Exception(f"Aventurine: TEX conversion failed (error {result})")
-
-    size = out_size.value
-    dds_bytes = bytes(ctypes.cast(out_data, ctypes.POINTER(ctypes.c_uint8 * size)).contents)
-    _tex_dll_free(out_data)
-    return dds_bytes
-
-# --- Native DLL for BIN parsing ---
-_bin_dll = None
-_bin_parse = None
-_bin_free = None
-
-def _load_bin_dll():
-    """Load the native BIN parser DLL"""
-    global _bin_dll, _bin_parse, _bin_free
-
-    if _bin_dll is not None:
-        return _bin_dll
-
-    dll_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'native', 'bin_parser.dll')
-    if os.path.exists(dll_path):
-        try:
-            _bin_dll = ctypes.CDLL(dll_path)
-
-            # Setup function signatures
-            _bin_dll.parse_bin_textures.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)), ctypes.POINTER(ctypes.c_uint32)]
-            _bin_dll.parse_bin_textures.restype = ctypes.c_int
-
-            _bin_dll.free_bin_result.argtypes = [ctypes.POINTER(ctypes.c_uint8)]
-            _bin_dll.free_bin_result.restype = None
-
-            _bin_parse = _bin_dll.parse_bin_textures
-            _bin_free = _bin_dll.free_bin_result
-            return _bin_dll
-        except Exception as e:
-            print(f"Aventurine: Failed to load BIN parser DLL: {e}")
-            _bin_dll = False
-            return False
-
-    _bin_dll = False
-    return False
-
-def _native_parse_bin_textures(bin_path):
-    """Parse BIN using native DLL, returns dict or None on failure"""
-    if not _load_bin_dll():
-        return None
-
+def load_tex_image(path):
+    texture = require_ritoshark().Tex.from_path(str(path))
+    pixels = np.frombuffer(texture.rgba_f32, dtype='<f4')
+    image = bpy.data.images.new(name=os.path.basename(path), width=texture.width,
+                                height=texture.height, alpha=True)
     try:
-        # Encode path to bytes
-        bin_path_bytes = bin_path.encode('utf-8')
+        image.pixels.foreach_set(pixels)
+        image['lol_source_path'] = str(path)
+        image.pack()
+    except Exception:
+        bpy.data.images.remove(image)
+        raise
+    return image
 
-        # Output pointers
-        out_data = ctypes.POINTER(ctypes.c_uint8)()
-        out_size = ctypes.c_uint32()
-
-        # Call DLL
-        result = _bin_parse(bin_path_bytes, ctypes.byref(out_data), ctypes.byref(out_size))
-
-        if result != 0:
-            return None
-
-        # Parse output string: "key=value\n..."
-        size = out_size.value
-        if size == 0:
-            _bin_free(out_data)
-            return {}
-
-        result_bytes = bytes(ctypes.cast(out_data, ctypes.POINTER(ctypes.c_uint8 * size)).contents)
-        result_str = result_bytes.decode('utf-8')
-
-        # Free the DLL-allocated memory
-        _bin_free(out_data)
-
-        # Parse into dict
-        tex_map = {}
-        for line in result_str.strip().split('\n'):
-            if '=' in line:
-                key, value = line.split('=', 1)
-                tex_map[key] = value
-
-        return tex_map
-    except Exception as e:
-        print(f"Aventurine: Native BIN parsing error: {e}")
-        return None
 
 def parse_materials_bin(bin_path):
-    """Parse a map materials.bin via the native DLL. Returns the parsed JSON dict
-    ({'materials': [{'key', 'name', 'samplers': [{'name', 'texture'}]}]}) or None
-    when the DLL is missing or predates the parse_materials_bin entry point."""
-    if not _load_bin_dll():
-        return None
-
-    try:
-        fn = _bin_dll.parse_materials_bin
-    except AttributeError:
-        # DLL on disk is older than bin_parser 1.2 — rebuild native/bin_parser.dll
-        return None
-
-    try:
-        fn.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)), ctypes.POINTER(ctypes.c_uint32)]
-        fn.restype = ctypes.c_int
-
-        out_data = ctypes.POINTER(ctypes.c_uint8)()
-        out_size = ctypes.c_uint32()
-        result = fn(bin_path.encode('utf-8'), ctypes.byref(out_data), ctypes.byref(out_size))
-        if result != 0:
-            return None
-
-        size = out_size.value
-        if size == 0:
-            _bin_free(out_data)
-            return {'materials': []}
-
-        result_bytes = bytes(ctypes.cast(out_data, ctypes.POINTER(ctypes.c_uint8 * size)).contents)
-        _bin_free(out_data)
-
-        import json
-        return json.loads(result_bytes.decode('utf-8'))
-    except Exception as e:
-        print(f"Aventurine: materials.bin parsing error: {e}")
-        return None
+    return materials_from_bin(require_ritoshark().read_bin(str(bin_path)))
 
 
 def _detect_skin_folder_name(skn_path):
@@ -308,11 +163,8 @@ def find_bin_and_read(skn_path):
     return None
 
 def parse_bin_for_textures(bin_path):
-    """Parse BIN file and extract texture mappings using native DLL."""
-    result = _native_parse_bin_textures(bin_path)
-    if result is not None:
-        return result
-    return {}
+    return textures_from_bin(require_ritoshark().read_bin(str(bin_path)))
+
 
 def resolve_texture_path(skn_path, tex_asset_path):
     if not tex_asset_path: return None
@@ -463,55 +315,31 @@ def import_textures(skn_object, skn_path):
                 continue
             
             bpy_image = None
-            temp_dds_path = None
-
-            # --- Load texture using Blender's native DDS support ---
+            temp_img = None
             try:
-                load_path = local_path
-                print(f"Aventurine:   -> Loading new texture: {local_path}")
-
-                # Convert TEX to temp DDS (just header swap, fast)
                 if local_path.lower().endswith('.tex'):
-                    import tempfile
-                    dds_bytes = tex_to_dds_bytes(local_path)
-                    fd, temp_dds_path = tempfile.mkstemp(suffix='.dds')
-                    os.close(fd)
-                    with open(temp_dds_path, 'wb') as f:
-                        f.write(dds_bytes)
-                    load_path = temp_dds_path
+                    bpy_image = load_tex_image(local_path)
+                else:
+                    temp_img = bpy.data.images.load(local_path, check_existing=False)
+                    width, height = temp_img.size
+                    pixels = np.empty(width * height * 4, dtype=np.float32)
+                    temp_img.pixels.foreach_get(pixels)
+                    bpy_image = bpy.data.images.new(
+                        name=os.path.basename(local_path).rsplit('.', 1)[0],
+                        width=width, height=height, alpha=True,
+                    )
+                    bpy_image.pixels.foreach_set(pixels)
+                    bpy_image['lol_source_path'] = local_path
+                    bpy_image.pack()
+            except Exception as error:
+                print(f'Aventurine: Failed to load texture: {error}')
+                if bpy_image is not None:
+                    bpy.data.images.remove(bpy_image)
+                    bpy_image = None
+            finally:
+                if temp_img is not None:
+                    bpy.data.images.remove(temp_img)
 
-                # Load with Blender native (fast C++ decoder)
-                temp_img = bpy.data.images.load(load_path, check_existing=False)
-
-                # Convert to uncompressed format for painting
-                # by reading pixels and creating a new image
-                fb = os.path.basename(local_path).rsplit('.', 1)[0]
-                width, height = temp_img.size
-
-                bpy_image = bpy.data.images.new(name=fb, width=width, height=height, alpha=True)
-
-                # Fast pixel transfer using numpy foreach_get/foreach_set
-                pixel_count = width * height * 4
-                pixels = np.empty(pixel_count, dtype=np.float32)
-                temp_img.pixels.foreach_get(pixels)
-                bpy_image.pixels.foreach_set(pixels)
-                bpy_image["lol_source_path"] = local_path
-                bpy_image.pack()
-
-                # Remove the temp image
-                bpy.data.images.remove(temp_img)
-
-                # Clean up temp DDS file
-                if temp_dds_path and os.path.exists(temp_dds_path):
-                    os.remove(temp_dds_path)
-
-            except Exception as e:
-                print(f"Aventurine: Failed to load texture: {e}")
-                # Clean up temp file on error
-                if temp_dds_path and os.path.exists(temp_dds_path):
-                    os.remove(temp_dds_path)
-
-            # --- Assignment ---
             if bpy_image:
                 # Add to cache for reuse
                 loaded_textures[local_path] = bpy_image

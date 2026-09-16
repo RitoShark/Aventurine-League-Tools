@@ -3,7 +3,8 @@ import bpy
 import mathutils
 import math
 import os
-from ..utils.binary_utils import BinaryStream, Vector, Quaternion, Hash
+from ..utils.binary_utils import Hash
+from ..utils.backend import require_ritoshark
 from . import import_skl
 
 
@@ -34,249 +35,22 @@ class ANMData:
         self.frame_count = 0
 
 
-def decompress_quat(bytes_data):
-    first = bytes_data[0] | (bytes_data[1] << 8)
-    second = bytes_data[2] | (bytes_data[3] << 8)
-    third = bytes_data[4] | (bytes_data[5] << 8)
-    bits = first | (second << 16) | (third << 32)
-    
-    max_index = (bits >> 45) & 3
-    one_div_sqrt2 = 0.70710678118
-    sqrt2_div_32767 = 0.00004315969
-    
-    a = ((bits >> 30) & 32767) * sqrt2_div_32767 - one_div_sqrt2
-    b = ((bits >> 15) & 32767) * sqrt2_div_32767 - one_div_sqrt2
-    c = (bits & 32767) * sqrt2_div_32767 - one_div_sqrt2
-    d = math.sqrt(max(0.0, 1.0 - (a * a + b * b + c * c)))
-    
-    # components: x, y, z, w correspond to d, a, b, c depending on max_index
-    if max_index == 0:
-        return mathutils.Quaternion((c, d, a, b)) # (w, x, y, z)
-    elif max_index == 1:
-        return mathutils.Quaternion((c, a, d, b))
-    elif max_index == 2:
-        return mathutils.Quaternion((c, a, b, d))
-    else:
-        return mathutils.Quaternion((d, a, b, c))
-
-
 def read_anm(filepath):
+    source = require_ritoshark().Anm.from_path(str(filepath))
     anm = ANMData()
-    
-    with open(filepath, 'rb') as f:
-        bs = BinaryStream(f)
-        
-        magic = bs.read_ascii(8)
-        version = bs.read_uint32()
-        
-        if magic == 'r3d2canm':
-            # Compressed ANM
-            bs.pad(12) # Resource size, token, flags
-            joint_count, frame_count = bs.read_uint32(2)
-            bs.pad(4) # jump cache count
-            
-            max_time, anm.fps = bs.read_float(2)
-            anm.duration = max_time + 1.0 / anm.fps
-            anm.frame_count = int(round(anm.duration * anm.fps))
-            
-            bs.pad(24) # Quantization properties
-            translation_min = bs.read_vec3()
-            translation_max = bs.read_vec3()
-            scale_min = bs.read_vec3()
-            scale_max = bs.read_vec3()
-            
-            frames_offset = bs.read_int32()
-            bs.pad(4) # jump caches
-            joint_hashes_offset = bs.read_int32()
-            
-            # Read joint hashes
-            bs.seek(joint_hashes_offset + 12)
-            joint_hashes = bs.read_uint32(joint_count)
-            if not isinstance(joint_hashes, (list, tuple)):
-                joint_hashes = [joint_hashes]
-            
-            anm.tracks = [ANMTrack(h) for h in joint_hashes]
-            
-            # Read compressed frames
-            bs.seek(frames_offset + 12)
-            for i in range(frame_count):
-                compressed_time, bits = bs.read_uint16(2)
-                compressed_transform = bs.read_bytes(6)
-                
-                joint_idx = bits & 16383
-                if joint_idx >= joint_count:
-                    continue
-                    
-                track = anm.tracks[joint_idx]
-                time = compressed_time / 65535.0 * max_time
-                frame_id = int(round(time * anm.fps))
-                
-                if frame_id not in track.poses:
-                    pose = ANMPose()
-                    track.poses[frame_id] = pose
-                else:
-                    pose = track.poses[frame_id]
-                
-                transform_type = bits >> 14
-                if transform_type == 0: # Rotation
-                    pose.rotation = decompress_quat(compressed_transform)
-                elif transform_type == 1: # Translation
-                    v = compressed_transform
-                    tx = (translation_max.x - translation_min.x) / 65535.0 * (v[0] | (v[1] << 8)) + translation_min.x
-                    ty = (translation_max.y - translation_min.y) / 65535.0 * (v[2] | (v[3] << 8)) + translation_min.y
-                    tz = (translation_max.z - translation_min.z) / 65535.0 * (v[4] | (v[5] << 8)) + translation_min.z
-                    pose.translation = mathutils.Vector((tx, ty, tz)) * import_skl.IMPORT_SCALE
-                elif transform_type == 2: # Scale
-                    v = compressed_transform
-                    sx = (scale_max.x - scale_min.x) / 65535.0 * (v[0] | (v[1] << 8)) + scale_min.x
-                    sy = (scale_max.y - scale_min.y) / 65535.0 * (v[2] | (v[3] << 8)) + scale_min.y
-                    sz = (scale_max.z - scale_min.z) / 65535.0 * (v[4] | (v[5] << 8)) + scale_min.z
-                    pose.scale = mathutils.Vector((sx, sy, sz))
-
-        elif magic == 'r3d2anmd':
-            # Uncompressed ANM (v4, v5)
-            if version == 5:
-                bs.pad(16) # size, token, version, flags
-                track_count, frame_count = bs.read_uint32(2)
-                
-                frame_duration = bs.read_float()
-                anm.fps = 1.0 / frame_duration
-                anm.duration = frame_count * frame_duration
-                anm.frame_count = frame_count
-                
-                joint_hashes_offset = bs.read_int32()
-                bs.pad(8) # asset name, time
-                vecs_offset, quats_offset, frames_offset = bs.read_int32(3)
-                
-                # Joint hashes
-                bs.seek(joint_hashes_offset + 12)
-                joint_hashes = bs.read_uint32(track_count)
-                if not isinstance(joint_hashes, (list, tuple)):
-                    joint_hashes = [joint_hashes]
-                
-                # Vector palette (DO NOT scale here - used for both translation AND scale)
-                bs.seek(vecs_offset + 12)
-                vec_count = (quats_offset - vecs_offset) // 12
-                vec_palette = [mathutils.Vector(bs.read_float(3)) for _ in range(vec_count)]
-                
-                # Quat palette (quantized)
-                bs.seek(quats_offset + 12)
-                quat_count = (joint_hashes_offset - quats_offset) // 6
-                quat_palette = [decompress_quat(bs.read_bytes(6)) for _ in range(quat_count)]
-                
-                # Tracks
-                anm.tracks = [ANMTrack(h) for h in joint_hashes]
-                
-                # Frames data
-                bs.seek(frames_offset + 12)
-                for f in range(frame_count):
-                    for t in range(track_count):
-                        trans_idx, scale_idx, rot_idx = bs.read_uint16(3)
-                        pose = ANMPose()
-                        pose.translation = vec_palette[trans_idx] * import_skl.IMPORT_SCALE  # Scale only translation
-                        pose.scale = vec_palette[scale_idx]  # Scale values stay as-is
-                        pose.rotation = quat_palette[rot_idx]
-                        anm.tracks[t].poses[f] = pose
-
-            elif version == 4:
-                bs.pad(16)
-                track_count, frame_count = bs.read_uint32(2)
-                frame_duration = bs.read_float()
-                anm.fps = 1.0 / frame_duration
-                anm.duration = frame_count * frame_duration
-                anm.frame_count = frame_count
-                
-                bs.pad(12)
-                vecs_offset, quats_offset, frames_offset = bs.read_int32(3)
-                
-                # Vector palette (DO NOT scale here - used for both translation AND scale)
-                bs.seek(vecs_offset + 12)
-                vec_count = (quats_offset - vecs_offset) // 12
-                vec_palette = [mathutils.Vector(bs.read_float(3)) for _ in range(vec_count)]
-                
-                # Quat palette (Full 16-byte)
-                bs.seek(quats_offset + 12)
-                quat_count = (frames_offset - quats_offset) // 16
-                quat_palette = []
-                for _ in range(quat_count):
-                    q = bs.read_float(4)
-                    quat_palette.append(mathutils.Quaternion((q[3], q[0], q[1], q[2]))) # (w, x, y, z)
-                
-                # Read frames with embedded hashes
-                bs.seek(frames_offset + 12)
-                hash_to_track = {}
-                for f in range(frame_count):
-                    for _ in range(track_count):
-                        joint_hash = bs.read_uint32()
-                        trans_idx, scale_idx, rot_idx = bs.read_uint16(3)
-                        bs.pad(2) # padding
-                        
-                        if joint_hash not in hash_to_track:
-                            track = ANMTrack(joint_hash)
-                            hash_to_track[joint_hash] = track
-                            anm.tracks.append(track)
-                        
-                        pose = ANMPose()
-                        pose.translation = vec_palette[trans_idx] * import_skl.IMPORT_SCALE  # Scale only translation
-                        pose.scale = vec_palette[scale_idx]  # Scale values stay as-is
-                        pose.rotation = quat_palette[rot_idx]
-                        hash_to_track[joint_hash].poses[f] = pose
-            else:
-                # Legacy r3d2anmd (v3 or other old versions)
-                bs.pad(4) # skl id
-                track_count, frame_count = bs.read_uint32(2)
-                anm.fps = float(bs.read_uint32())
-                if anm.fps == 0:
-                    anm.fps = 30.0
-                anm.duration = frame_count / anm.fps
-                anm.frame_count = frame_count
-                
-                for i in range(track_count):
-                    joint_name = bs.read_padded_ascii(32).rstrip('\0')
-                    joint_hash = Hash.elf(joint_name)
-                    bs.pad(4) # flags
-                    
-                    track = ANMTrack(joint_hash)
-                    anm.tracks.append(track)
-                    
-                    for f_id in range(frame_count):
-                        q = bs.read_float(4)
-                        t = bs.read_float(3)
-                        pose = ANMPose()
-                        pose.rotation = mathutils.Quaternion((q[3], q[0], q[1], q[2]))
-                        pose.translation = mathutils.Vector(t) * import_skl.IMPORT_SCALE
-                        pose.scale = mathutils.Vector((1, 1, 1))
-                        track.poses[f_id] = pose
-
-        else:
-            # Legacy ANM (v1, v2, v3)
-            f.seek(8)
-            version = bs.read_uint32()
-            bs.pad(4) # skl id
-            track_count, frame_count = bs.read_uint32(2)
-            anm.fps = float(bs.read_uint32())
-            if anm.fps == 0:
-                anm.fps = 30.0
-            anm.duration = frame_count / anm.fps
-            anm.frame_count = frame_count
-            
-            for i in range(track_count):
-                joint_name = bs.read_padded_ascii(32).rstrip('\0')
-                joint_hash = Hash.elf(joint_name)
-                bs.pad(4) # flags
-                
-                track = ANMTrack(joint_hash)
-                anm.tracks.append(track)
-                
-                for f_id in range(frame_count):
-                    q = bs.read_float(4)
-                    t = bs.read_float(3)
-                    pose = ANMPose()
-                    pose.rotation = mathutils.Quaternion((q[3], q[0], q[1], q[2]))
-                    pose.translation = mathutils.Vector(t) * import_skl.IMPORT_SCALE
-                    pose.scale = mathutils.Vector((1, 1, 1))
-                    track.poses[f_id] = pose
-    
+    anm.fps = source.fps
+    anm.frame_count = source.frame_count
+    anm.duration = source.frame_count / source.fps
+    for item in source.tracks:
+        track = ANMTrack(item.joint_hash)
+        for frame in item.frames:
+            pose = ANMPose()
+            x, y, z, w = frame.rotation
+            pose.rotation = mathutils.Quaternion((w, x, y, z))
+            pose.translation = mathutils.Vector(frame.translation) * import_skl.IMPORT_SCALE
+            pose.scale = mathutils.Vector(frame.scale)
+            track.poses[int(round(frame.time * source.fps))] = pose
+        anm.tracks.append(track)
     return anm
 
 

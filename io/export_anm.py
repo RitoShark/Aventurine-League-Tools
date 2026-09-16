@@ -1,9 +1,9 @@
 import bpy
 import os
-import struct
 import mathutils
 import math
-from ..utils.binary_utils import BinaryStream, Hash
+from ..utils.binary_utils import Hash
+from ..utils.format_data import write_animation
 from . import import_skl
 from . import bone_utils
 
@@ -548,60 +548,8 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
 
     sorted_hashes = sorted(joint_data.keys())
 
-    with open(filepath, 'wb') as f:
-        bs = BinaryStream(f)
-        
-        # Header
-        bs.write_ascii('r3d2anmd')
-        bs.write_uint32(4)  # version
-        
-        bs.write_uint32(0)  # filesize placeholder (offset 12)
-        bs.write_uint32(0xBE0794D3, 0, 0)  # format token, unknown, flags
-        
-        bs.write_uint32(len(joint_data), frame_count)
-        bs.write_float(1.0 / fps)  # frame duration
-        
-        bs.write_int32(0, 0, 0)  # tracks offset, asset name offset, time offset (unused in v4)
-        
-        vecs_offset_pos = bs.tell()
-        bs.write_int32(64)  # vecs offset (always 64 for v4)
-        bs.write_int32(0, 0)  # quats offset, frames offset (fill later)
-        
-        bs.stream.write(b'\x00' * 12)  # Padding to reach offset 64
-        
-        # Write vector palette
-        for v in vec_palette:
-            bs.write_float(v.x, v.y, v.z)
-            
-        quat_offset = bs.tell() - 12  # Subtract 12 as per v4 format spec
-        
-        # Write quaternion palette (x, y, z, w order)
-        for q in quat_palette:
-            bs.write_float(q.x, q.y, q.z, q.w)
-            
-        frame_offset = bs.tell() - 12
-        
-        # Write frame data: for each frame, for each joint
-        for f_idx in range(frame_count):
-            for h in sorted_hashes:
-                frames = joint_data[h]
-                if f_idx < len(frames):
-                    t_id, s_id, r_id = frames[f_idx]
-                else:
-                    t_id, s_id, r_id = (0, 0, 0)
-                    
-                bs.write_uint32(h)
-                bs.write_uint16(t_id, s_id, r_id, 0)  # t, s, r indices + padding
-        
-        # Patch file size
-        total_size = bs.tell()
-        bs.seek(12)
-        bs.write_uint32(total_size)
-        
-        # Patch offsets
-        bs.seek(vecs_offset_pos + 4)
-        bs.write_int32(quat_offset, frame_offset)
-    
+    write_animation(filepath, fps, joint_data, vec_palette, quat_palette)
+
     return True
 
 def write_anm_from_data(filepath, anm_data, fps=None, disable_scaling=False):
@@ -670,41 +618,10 @@ def write_anm_from_data(filepath, anm_data, fps=None, disable_scaling=False):
             f"Shorten the animation ({frame_count} frames)."
         )
 
-    with open(filepath, 'wb') as f:
-        bs = BinaryStream(f)
-
-        bs.write_ascii('r3d2anmd')
-        bs.write_uint32(4)                       # version
-        bs.write_uint32(0)                       # filesize placeholder (offset 12)
-        bs.write_uint32(0xBE0794D3, 0, 0)        # format token, unknown, flags
-        bs.write_uint32(joint_count, frame_count)
-        bs.write_float(1.0 / out_fps)
-        bs.write_int32(0, 0, 0)                  # tracks/asset/time offsets (v4 unused)
-
-        vecs_offset_pos = bs.tell()
-        bs.write_int32(64)                       # vecs always start at 64
-        bs.write_int32(0, 0)                     # quats/frames offsets (filled later)
-        bs.stream.write(b'\x00' * 12)            # padding to offset 64
-
-        for v in vec_palette:
-            bs.write_float(v.x, v.y, v.z)
-
-        quat_offset = bs.tell() - 12
-
-        for q in quat_palette:
-            bs.write_float(q.x, q.y, q.z, q.w)  # write as x,y,z,w
-
-        frame_offset = bs.tell() - 12
-
-        for h, t_id, s_id, r_id in frame_entries:
-            bs.write_uint32(h)
-            bs.write_uint16(t_id, s_id, r_id, 0)
-
-        total_size = bs.tell()
-        bs.seek(12)
-        bs.write_uint32(total_size)
-        bs.seek(vecs_offset_pos + 4)
-        bs.write_int32(quat_offset, frame_offset)
+    joint_data = {h: [] for h in sorted_hashes}
+    for h, t_id, s_id, r_id in frame_entries:
+        joint_data[h].append((t_id, s_id, r_id))
+    write_animation(filepath, out_fps, joint_data, vec_palette, quat_palette)
 
     return True
 

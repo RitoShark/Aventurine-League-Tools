@@ -1,7 +1,7 @@
 import bpy
 import mathutils
 import os
-from ..utils.binary_utils import BinaryStream, Hash
+from ..utils.backend import require_ritoshark
 from . import import_skl
 from . import bone_utils
 
@@ -79,7 +79,6 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
     # standalone export, otherwise the compact used-bone list from the SKN.
     if influences is None:
         influences = list(range(joint_count))
-    influence_count = len(influences)
 
     # --- Pre-calculate Matrices (Recursive) to handle Mix of Native/New bones ---
     # format: [bone_index] = (Matrix_Global_League, Matrix_Local_League)
@@ -251,101 +250,27 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
     for i in range(joint_count):
         calc_league_matrix(i)
 
-    with open(filepath, 'wb') as f:
-        bs = BinaryStream(f)
-        
-        # 1. Header 
-        bs.write_uint32(0) # Resource size placeholder
-        bs.write_uint32(0x22FD4FC3) # Magic
-        bs.write_uint32(0) # Version
-        
-        bs.write_uint16(0) # Flags
-        bs.write_uint16(joint_count)
-        bs.write_uint32(influence_count) # Influence count
+    rs = require_ritoshark()
+    joints = []
+    scale = (1.0 if disable_scaling else import_skl.EXPORT_SCALE) * model_scale
+    for i, pbone in enumerate(bone_list):
+        global_matrix, local_matrix = league_matrices[i]
+        local_t, local_r, local_s = local_matrix.decompose()
+        try:
+            inverse = global_matrix.inverted()
+        except ValueError:
+            inverse = mathutils.Matrix.Identity(4)
+        inverse_t, inverse_r, inverse_s = inverse.decompose()
+        joints.append(rs.Joint(
+            get_export_name(pbone.name), i,
+            bone_name_to_index.get(pbone.parent.name, -1) if pbone.parent else -1,
+            2.1, tuple(local_t * scale), tuple(local_s),
+            (local_r.x, local_r.y, local_r.z, local_r.w),
+            tuple(inverse_t * scale), tuple(inverse_s),
+            (inverse_r.x, inverse_r.y, inverse_r.z, inverse_r.w),
+        ))
+    rs.Skl.new(joints, influences).to_path(str(filepath))
 
-        # Offsets
-        joints_offset = 64
-        joint_indices_offset = joints_offset + joint_count * 100
-        influences_offset = joint_indices_offset + joint_count * 8
-        joint_names_offset = influences_offset + influence_count * 2
-        
-        bs.write_int32(joints_offset, joint_indices_offset, influences_offset, 0, 0, joint_names_offset)
-        
-        # 5 Reserved offsets
-        for _ in range(5):
-            bs.write_uint32(0xFFFFFFFF)
-            
-        # 2. Names
-        name_offsets = {}
-        bs.seek(joint_names_offset)
-        for i, pbone in enumerate(bone_list):
-            name_offsets[i] = bs.tell()
-            name = get_export_name(pbone.name)
-            bs.write_ascii(name)
-            bs.write_uint8(0)
-            
-        # 3. Joint Data
-        bs.seek(joints_offset)
-        for i, pbone in enumerate(bone_list):
-            bs.write_uint16(0) # flags
-            bs.write_uint16(i) # id
-            
-            parent_idx = -1
-            if pbone.parent:
-                parent_idx = bone_name_to_index.get(pbone.parent.name, -1)
-            bs.write_int16(parent_idx)
-            
-            bs.write_uint16(0) # flags
-            bs.write_uint32(Hash.elf(get_export_name(pbone.name)))
-            bs.write_float(2.1) # radius
-            
-            # Retrieve calculated matrices
-            l_mat_global, l_mat_local = league_matrices[i]
-            
-            # Local Transform (TRS)
-            l_t, l_r, l_s = l_mat_local.decompose()
-
-            # Scale translations back to game units (native_bind_t is at 0.01 scale).
-            # model_scale is a uniform size multiplier — keep it matched to the SKN
-            # and ANM Scale so a shrunk/grown export stays internally consistent.
-            scale = (1.0 if disable_scaling else import_skl.EXPORT_SCALE) * model_scale
-            bs.write_vec3(l_t * scale)
-            bs.write_vec3(l_s)
-            bs.write_quat(l_r)
-            
-            # Inversed Global Transform (Bind Matrix Inv)
-            # Some LoL bones have zero scale (used to hide bones), making the global
-            # matrix singular. Fall back to identity since no verts are weighted to them.
-            try:
-                ig_mat = l_mat_global.inverted()
-            except ValueError:
-                ig_mat = mathutils.Matrix.Identity(4)
-            ig_t, ig_r, ig_s = ig_mat.decompose()
-            
-            bs.write_vec3(ig_t * scale)
-            bs.write_vec3(ig_s)
-            bs.write_quat(ig_r)
-            
-            # Name offset
-            curr_pos = bs.tell()
-            bs.write_int32(name_offsets[i] - curr_pos)
-            
-        # 4. Indices and Influences
-        bs.seek(joint_indices_offset)
-        for i, pbone in enumerate(bone_list):
-            bs.write_uint16(i)
-            bs.write_uint16(0)
-            bs.write_uint32(Hash.elf(get_export_name(pbone.name)))
-            
-        bs.seek(influences_offset)
-        for joint_idx in influences:
-            bs.write_uint16(joint_idx)
-            
-        # 6. Finalize Size
-        total_size = bs.tell()
-        bs.seek(0)
-        bs.write_uint32(total_size)
-        
     return True
 
 def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False, use_visual_pose=False, clean_names=True, apply_object_transform=True, model_scale=1.0):

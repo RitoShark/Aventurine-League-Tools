@@ -1,6 +1,14 @@
 # Third-Party Licenses
 
-This project uses native DLLs built from the following open-source projects.
+## RitoShark
+
+The bundled `ritoshark` Python extension is dual licensed under MIT or Apache-2.0.
+The complete license texts are in [vendor/licenses/LICENSE-MIT](vendor/licenses/LICENSE-MIT)
+and [vendor/licenses/LICENSE-APACHE](vendor/licenses/LICENSE-APACHE).
+The wheel name and SHA-256 are recorded in [vendor/wheel.json](vendor/wheel.json).
+
+The historical notices below are retained for attribution. The ritobin and Ritoddstex
+DLLs and their wrapper sources have been removed; BIN and TEX now use RitoShark.
 
 ---
 

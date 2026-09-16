@@ -2,7 +2,9 @@
 import bpy
 import os
 import mathutils
-from ..utils.binary_utils import BinaryStream, Vector
+import struct
+from ..utils.binary_utils import Vector
+from ..utils.backend import require_ritoshark
 from . import import_skl
 from ..utils import texture_manager
 
@@ -17,83 +19,25 @@ class SKNVertex:
         self.uv = None
 
 
-class SKNSubmesh:
-    __slots__ = ('name', 'vertex_start', 'vertex_count', 'index_start', 'index_count')
-    
-    def __init__(self):
-        self.name = None
-        self.vertex_start = None
-        self.vertex_count = None
-        self.index_start = None
-        self.index_count = None
-
-
 def read_skn(filepath):
-    indices = []
+    mesh = require_ritoshark().Skn.from_path(str(filepath))
     vertices = []
-    submeshes = []
-    
-    with open(filepath, 'rb') as f:
-        bs = BinaryStream(f)
-        
-        magic = bs.read_uint32()
-        if magic != 0x00112233:
-            raise Exception(f'Wrong SKN signature')
-        
-        major, minor = bs.read_uint16(), bs.read_uint16()
-        
-        vertex_type = 0
-        if major == 0:
-            index_count, vertex_count = bs.read_uint32(), bs.read_uint32()
-            submesh = SKNSubmesh()
-            submesh.name = 'Base'
-            submesh.vertex_start = 0
-            submesh.vertex_count = vertex_count
-            submesh.index_start = 0
-            submesh.index_count = index_count
-            submeshes.append(submesh)
-        else:
-            submesh_count = bs.read_uint32()
-            submeshes = [SKNSubmesh() for _ in range(submesh_count)]
-            
-            for submesh in submeshes:
-                submesh.name = bs.read_padded_ascii(64)
-                submesh.vertex_start = bs.read_uint32()
-                submesh.vertex_count = bs.read_uint32()
-                submesh.index_start = bs.read_uint32()
-                submesh.index_count = bs.read_uint32()
-            
-            if major >= 4:
-                bs.pad(4) # flags
-            
-            index_count, vertex_count = bs.read_uint32(), bs.read_uint32()
-            
-            if major >= 4:
-                bs.pad(4) # vertex_size
-                vertex_type = bs.read_uint32()
-                bs.pad(40) # AABB and Sphere
-        
-        # Read indices
-        face_count = index_count // 3
-        for i in range(face_count):
-            face = bs.read_uint16(3)
-            if not (face[0] == face[1] or face[1] == face[2] or face[2] == face[0]):
-                indices.extend(face)
-        
-        # Read vertices
-        vertices = [SKNVertex() for _ in range(vertex_count)]
-        for vertex in vertices:
-            vertex.position = bs.read_vec3()
-            vertex.influences = bs.read_bytes(4)
-            vertex.weights = bs.read_float(4)
-            bs.pad(12) # Normal
-            vertex.uv = bs.read_vec2()
-            
-            if vertex_type >= 1:
-                bs.pad(4)
-                if vertex_type == 2:
-                    bs.pad(16)
-    
+    for position, influences, weights, uv in zip(
+        struct.iter_unpack('<3f', mesh.positions),
+        struct.iter_unpack('<4I', mesh.blend_indices),
+        struct.iter_unpack('<4f', mesh.blend_weights),
+        struct.iter_unpack('<2f', mesh.uvs),
+    ):
+        vertex = SKNVertex()
+        vertex.position = Vector(*position)
+        vertex.influences = influences
+        vertex.weights = weights
+        vertex.uv = Vector(*uv)
+        vertices.append(vertex)
+    indices = [item[0] for item in struct.iter_unpack('<I', mesh.indices)]
+    submeshes = mesh.submeshes
+    if not submeshes:
+        submeshes = [require_ritoshark().Submesh('Base', 0, mesh.vertex_count, 0, len(indices))]
     return indices, vertices, submeshes
 
 

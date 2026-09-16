@@ -93,13 +93,41 @@ Check for updates directly within Blender:
 
 **Compatibility**
 - Blender 4.0 or newer
+- Release ZIPs bundle the Windows x64 RitoShark binding (CPython 3.9+ abi3)
 - Supports multiple SKN format versions
 - Cross-compatible with League of Legends game files
 
 **Architecture**
-- Native Python implementation with optimized C/C++ DLLs for file parsing
+- SKN/SKL/ANM import and export use the RitoShark Python binding, shared with RitoShark Maya
+- BIN material extraction and TEX decoding use RitoShark; textures load directly into Blender pixels
 - No external dependencies or converters required
 - Modular design for easy maintenance and updates
+
+MAPGEO geometry and SCB/SCO retain their existing Python format implementation for now.
+The binding does not yet expose all of their editable lighting, vertex-color, flag,
+and pivot metadata, or an SCO writer. These paths remain available with their existing
+options; MAPGEO material and texture loading already uses RitoShark.
+
+The binding lives in `vendor/ritoshark`, loaded as an addon-local package without changing
+Blender's Python search path. `vendor/wheel.json` records the exact wheel and SHA-256.
+Restart Blender after updating the addon so its loaded native module is replaced.
+
+To replace the bundled binding with a wheel built from RitoShark-Crates:
+
+```sh
+python scripts/vendor_ritoshark.py path/to/ritoshark-0.1.0-cp39-abi3-win_amd64.whl
+```
+
+Use a wheel matching the host OS and architecture. Release packaging includes `vendor`
+and its licenses. The committed wheel supports Windows x64 only.
+
+Run integration tests with Python 3.11 and Blender's Python module, or a matching Blender
+Python environment:
+
+```sh
+python -m pip install bpy==4.2.0
+python tests/test_backend.py -v
+```
 
 ---
 
@@ -112,8 +140,7 @@ Check for updates directly within Blender:
 **Acknowledgments**
 - Based on the `lol_maya` plugin by [tarngaina](https://github.com/tarngaina)
 - Physics implementation derived from [Wiggle 2](https://github.com/shteeve3d/wiggle) by shteeve3d
-- BIN file parsing powered by [ritobin](https://github.com/moonshadow565/ritobin) by moonshadow565
-- TEX to DDS conversion powered by [Ritoddstex](https://github.com/Morilli/Ritoddstex) by Morilli
+- File-format backend powered by [RitoShark](https://github.com/RitoShark/RitoShark-Crates)
 
 See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for full license details of third-party components.
 
