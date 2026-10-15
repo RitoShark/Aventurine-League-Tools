@@ -294,7 +294,11 @@ entries: map[hash,embed] = {
         exact = self.directory / 'assets/shared/texture.dds'
         exact.parent.mkdir(parents=True)
         exact.touch()
-        self.assertEqual(Path(texture_manager.resolve_texture_path(str(skn), 'assets/shared/texture.dds')), exact)
+        resolved = Path(texture_manager.resolve_texture_path(str(skn), 'assets/shared/texture.dds'))
+        # Windows runners use RUNNER~1 for TEMP, while resolve() expands it to
+        # runneradmin. Compare file identity rather than the spelling of its path.
+        self.assertTrue(resolved.samefile(exact))
+        self.assertFalse(resolved.samefile(skn.parent / 'texture.dds'))
 
     def test_linked_bin_legacy_sampler_and_cycle(self):
         # Exercise the actual Rust BIN serializer/parser, including a dependency cycle.
