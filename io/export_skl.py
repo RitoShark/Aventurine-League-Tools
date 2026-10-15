@@ -264,12 +264,15 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
         joints.append(rs.Joint(
             get_export_name(pbone.name), i,
             bone_name_to_index.get(pbone.parent.name, -1) if pbone.parent else -1,
-            2.1, tuple(local_t * scale), tuple(local_s),
+            pbone.get('lol_joint_radius', 2.1), tuple(local_t * scale), tuple(local_s),
             (local_r.x, local_r.y, local_r.z, local_r.w),
             tuple(inverse_t * scale), tuple(inverse_s),
             (inverse_r.x, inverse_r.y, inverse_r.z, inverse_r.w),
+            flags=pbone.get('lol_joint_flags', 0),
         ))
-    rs.Skl.new(joints, influences).to_path(str(filepath))
+    rs.Skl.new(joints, influences, name=armature_obj.get('lol_skl_name', ''),
+               asset=armature_obj.get('lol_skl_asset', ''),
+               flags=armature_obj.get('lol_skl_flags', 0)).to_path(str(filepath))
 
     return True
 

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (3, 2, 0),
+    "version": (4, 0, 0),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -703,6 +703,12 @@ class ExportMAPGEO(bpy.types.Operator, ExportHelper):
     version: EnumProperty(name="Version", description="Target mapgeo format version",
                          items=_mapgeo_version_items)
 
+    bucket_grid_mode: EnumProperty(
+        name="Spatial Data",
+        items=[('ORIGINAL', 'Preserve original', 'Requires the original source file and matching format version'),
+               ('DISABLED', 'Disabled spatial data', 'Experimental: the map may not render correctly in-game')],
+        default='ORIGINAL')
+
     use_half_float: BoolProperty(
         name="Use Half Float",
         description=("Pack normals and UVs as 16-bit half floats to shrink the file "
@@ -718,7 +724,7 @@ class ExportMAPGEO(bpy.types.Operator, ExportHelper):
     def execute(self, context):
         from .io import export_mapgeo
         return export_mapgeo.save(self, context, self.filepath, version=int(self.version),
-                                  use_half_float=self.use_half_float)
+                                  use_half_float=self.use_half_float, bucket_grid_mode=self.bucket_grid_mode)
 
 
 # Export operator for SKN

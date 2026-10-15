@@ -6,6 +6,8 @@ import tempfile
 import unittest
 
 import bpy
+import mathutils
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('aventurine', ROOT / '__init__.py')
@@ -16,7 +18,7 @@ spec.loader.exec_module(addon)
 from aventurine.utils.backend import require_ritoshark
 from aventurine.utils.format_data import packed, materials_from_bin, textures_from_bin
 from aventurine.utils.texture_manager import load_tex_image, parse_bin_for_textures
-from aventurine.io import import_skn, import_skl, import_anm, export_skn, export_skl, export_anm
+from aventurine.io import import_skn, import_skl, import_anm, export_skn, export_skl, export_anm, export_mapgeo
 
 rs = require_ritoshark()
 
@@ -152,6 +154,145 @@ class BackendTests(unittest.TestCase):
         self.assertVector(image.pixels[:4], (0, 0, 1, 128 / 255), places=4)
         self.assertVector(image.pixels[4:], (1, 0, 0, 1), places=4)
         self.assertTrue(image.packed_file)
+
+    def test_insert_animation_preserves_existing_keys_and_replaces_overlap(self):
+        joints, _ = import_skl.read_skl(self.skeleton())
+        armature = import_skl.create_armature(joints, bone_orient='NATIVE')
+        armature.animation_data_create()
+        action = bpy.data.actions.new('insert_motion')
+        armature.animation_data.action = action
+        source = rs.Skl.from_path(str(self.directory / 'skin.skl'))
+        path = self.directory / 'insert.anm'
+        rs.Anm.new(30, [rs.AnimTrack(joint.hash, [
+            rs.AnimFrame(i / 30, (0, 0, 0, 1),
+                         (i * 10, 100 if joint.id else 0, 0), (1, 1, 1))
+            for i in range(3)
+        ]) for joint in source.joints]).to_path(str(path))
+        animation = import_anm.read_anm(path)
+        import_anm.apply_anm(animation, armature)
+        curve = action.fcurves[0]
+        curve.keyframe_points[0].interpolation = 'CONSTANT'
+        original = {p.co.x: p.co.y for p in curve.keyframe_points}
+        import_anm.apply_anm(animation, armature, frame_offset=10)
+        after = {p.co.x: p.co.y for p in curve.keyframe_points}
+        for frame, value in original.items():
+            self.assertAlmostEqual(after[frame], value)
+        self.assertEqual(curve.keyframe_points[0].interpolation, 'CONSTANT')
+        self.assertGreater(max(after), max(original))
+        counts = [len(fc.keyframe_points) for fc in action.fcurves]
+        import_anm.apply_anm(animation, armature, frame_offset=10)
+        self.assertEqual(counts, [len(fc.keyframe_points) for fc in action.fcurves])
+        self.assertEqual(len(curve.keyframe_points), len({p.co.x for p in curve.keyframe_points}))
+
+    def test_custom_normals_survive_skin_roundtrip_and_visual_export(self):
+        joints, influences = import_skl.read_skl(self.skeleton())
+        armature = import_skl.create_armature(joints, bone_orient='NATIVE')
+        path = self.directory / 'normals.skn'
+        source = rs.Skn.new(
+            positions=packed('f', [(0, 0, 0), (100, 0, 0), (0, 100, 0)]),
+            normals=packed('f', [(0.6, 0, 0.8)] * 3),
+            uvs=packed('f', [(0, 0), (1, 0), (0, 1)]),
+            blend_indices=packed('I', [(0, 0, 0, 0)] * 3),
+            blend_weights=packed('f', [(1, 0, 0, 0)] * 3),
+            indices=packed('I', [(0, 1, 2)]),
+            submeshes=[rs.Submesh('body', 0, 3, 0, 3)],
+        )
+        source.to_path(str(path))
+        indices, vertices, submeshes = import_skn.read_skn(path)
+        obj = import_skn.create_mesh(indices, vertices, submeshes, 'normals', armature, joints, influences)
+        bpy.context.view_layer.update()
+        for visual in (False, True):
+            with self.subTest(visual=visual):
+                out = self.directory / 'normals-out.skn'
+                export_skn.write_skn_multi(str(out), [obj], armature, use_visual_pose=visual)
+                for normal in struct.iter_unpack('<3f', rs.Skn.from_path(str(out)).normals):
+                    self.assertVector(normal, (0.6, 0, 0.8), places=3)
+
+    def test_hard_edges_and_nonuniform_scale_keep_corner_normals(self):
+        mesh = bpy.data.meshes.new('hard_edges')
+        mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)], [],
+                         [(0, 1, 2), (0, 3, 1)])
+        mesh.uv_layers.new()
+        obj = bpy.data.objects.new('hard_edges', mesh)
+        bpy.context.scene.collection.objects.link(obj)
+        data = export_skn.collect_mesh_data(obj, None, {}, 'body')
+        self.assertEqual(len(data['vertices']), 6)
+        self.assertVector(data['vertices'][0]['normal'], (0, -1, 0))
+        self.assertVector(data['vertices'][3]['normal'], (0, 0, 1))
+        if hasattr(mesh, 'use_auto_smooth'):
+            mesh.use_auto_smooth = True
+        for polygon in mesh.polygons:
+            polygon.use_smooth = True
+        mesh.normals_split_custom_set([(0.6, 0.8, 0)] * len(mesh.loops))
+        obj.scale = (2, 1, 1)
+        bpy.context.view_layer.update()
+        data = export_skn.collect_mesh_data(obj, None, {}, 'body', disable_transforms=True)
+        expected = mathutils.Vector((0.3, 0.8, 0)).normalized()
+        for vertex in data['vertices']:
+            self.assertVector(vertex['normal'], expected, places=3)
+
+    def test_concave_polygon_export_uses_valid_triangles(self):
+        mesh = bpy.data.meshes.new('concave')
+        points = [(0, 0, 0), (3, 0, 0), (3, 3, 0), (2, 3, 0),
+                  (2, 1, 0), (1, 1, 0), (1, 3, 0), (0, 3, 0)]
+        mesh.from_pydata(points, [], [tuple(range(8))])
+        mesh.uv_layers.new()
+        obj = bpy.data.objects.new('concave', mesh)
+        bpy.context.scene.collection.objects.link(obj)
+        data = export_skn.collect_mesh_data(obj, None, {}, 'body', disable_scaling=True)
+        self.assertEqual(len(data['indices']), 18)
+        area = 0
+        for offset in range(0, len(data['indices']), 3):
+            a, b, c = [data['vertices'][i]['pos'] for i in data['indices'][offset:offset+3]]
+            area += (b-a).cross(c-a).length / 2
+        self.assertAlmostEqual(area, 7)
+
+    def test_map_export_does_not_silently_discard_spatial_data(self):
+        out = self.directory / 'existing.mapgeo'
+        out.write_bytes(b'keep existing file')
+        context = SimpleNamespace(scene={})
+        with self.assertRaisesRegex(ValueError, 'Cannot preserve'):
+            export_mapgeo.write_mapgeo(context, None, 18, str(out))
+        self.assertEqual(out.read_bytes(), b'keep existing file')
+        source = self.directory / 'source.mapgeo'
+        scene = {'mapgeo_source': str(source), 'mapgeo_trailing_offset': 8, 'mapgeo_version': 18}
+        context.scene = scene
+        source.write_bytes(b'OEGM' + struct.pack('<I', 18) + b'spatial data')
+        self.assertEqual(export_mapgeo._source_trailing_bytes(context, 18), b'spatial data')
+        self.assertIsNone(export_mapgeo._source_trailing_bytes(context, 17))
+        source.write_bytes(b'OEGM')
+        self.assertIsNone(export_mapgeo._source_trailing_bytes(context, 18))
+
+    def test_bundled_dds_decoder(self):
+        header = [124, 0x100F, 1, 1, 4, 0, 1] + [0] * 11
+        header += [32, 0x41, 0, 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000]
+        header += [0x1000, 0, 0, 0, 0]
+        data = b'DDS ' + struct.pack('<31I', *header) + bytes([30, 20, 10, 40])
+        image = rs.Dds.from_bytes(data)
+        self.assertEqual((image.width, image.height), (1, 1))
+        self.assertEqual(image.rgba, bytes([10, 20, 30, 40]))
+
+    def test_map_export_preserves_tail_and_allows_explicit_disabled_mode(self):
+        mesh = bpy.data.meshes.new('map')
+        mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+        mesh.uv_layers.new()
+        obj = bpy.data.objects.new('map', mesh)
+        bpy.context.scene.collection.objects.link(obj)
+        bpy.context.view_layer.update()
+        source = self.directory / 'map-source.mapgeo'
+        tail = b'preserved spatial data'
+        source.write_bytes(b'OEGM' + struct.pack('<I', 18) + tail)
+        context = SimpleNamespace(scene={'mapgeo_source': str(source),
+                                        'mapgeo_trailing_offset': 8, 'mapgeo_version': 18})
+        out = self.directory / 'map-out.mapgeo'
+        collection = bpy.context.scene.collection
+        count, mode = export_mapgeo.write_mapgeo(context, collection, 18, str(out))
+        self.assertEqual((count, mode), (1, 'original'))
+        self.assertTrue(out.read_bytes().endswith(tail))
+        context.scene.clear()
+        count, mode = export_mapgeo.write_mapgeo(context, collection, 18, str(out), bucket_grid_mode='DISABLED')
+        self.assertEqual((count, mode), (1, 'disabled'))
+        self.assertFalse(out.read_bytes().endswith(tail))
 
     def test_invalid_files_raise_format_error(self):
         path = self.directory / 'bad.bin'

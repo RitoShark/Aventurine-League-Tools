@@ -1,95 +1,35 @@
 import bpy
 import os
 import struct
+from ..utils.backend import require_ritoshark
+import base64
+import json
 import mathutils
 
 def read_scb(filepath):
-    """Read SCB file and return data structure"""
-    with open(filepath, 'rb') as f:
-        # Read magic
-        magic = f.read(8).decode('ascii', errors='ignore')
-        if magic != 'r3d2Mesh':
-            raise ValueError(f"Invalid SCB file signature: {magic}")
-        
-        # Read version
-        major, minor = struct.unpack('<HH', f.read(4))
-        # Support 3.2, 2.1, 2.2
-        # Simple check: Major 3 or Major 2
-        if major not in (2, 3):
-             raise ValueError(f"Unsupported SCB version: {major}.{minor}")
-        
-        # Skip name padding (128 bytes)
-        f.seek(128, 1)
-        
-        # Read counts and flag
-        vertex_count, face_count, scb_flag = struct.unpack('<III', f.read(12))
-        
-        # Read bounding box (6 floats = 24 bytes)
-        bbox = struct.unpack('<6f', f.read(24))
-        
-        # Read vertex type (only for version 3.2)
-        vertex_type = 0
-        if major == 3 and minor == 2:
-            vertex_type = struct.unpack('<I', f.read(4))[0]
-        
-        # Read vertices (swap Y and Z, rotate around Z by 180 degrees)
-        vertices = []
-        for i in range(vertex_count):
-            x, y, z = struct.unpack('<fff', f.read(12))
-            # Match current project SKN coords: (-x, -z, y)
-            vertices.append(mathutils.Vector((-x, -z, y)))
-
-        # Read per-vertex colors if present (stored BGRA, one per vertex).
-        # Convert to RGBA floats 0-1 to match project convention (see import_mapgeo).
-        colors = []
-        if vertex_type == 1:
-            for i in range(vertex_count):
-                b, g, r, a = struct.unpack('<4B', f.read(4))
-                colors.append((r / 255.0, g / 255.0, b / 255.0, a / 255.0))
-        
-        # Read central point
-        cx, cy, cz = struct.unpack('<fff', f.read(12))
-        central = mathutils.Vector((-cx, -cz, cy))
-        
-        # Read faces
-        indices = []
-        uvs = []
-        material = None
-        
-        for i in range(face_count):
-            # Read face indices
-            idx0, idx1, idx2 = struct.unpack('<III', f.read(12))
-            
-            # Skip degenerate faces
-            if idx0 == idx1 or idx1 == idx2 or idx2 == idx0:
-                # Still need to read material and UVs
-                f.seek(64, 1)  # Material name
-                f.seek(24, 1)  # UVs (6 floats)
-                continue
-            
-            indices.extend([idx0, idx1, idx2])
-            
-            # Read material name (64 bytes, padded)
-            material_bytes = f.read(64)
-            if i == 0: # Only grab first material for now, often SCB has 1 material
-                material = material_bytes.split(b'\x00')[0].decode('ascii', errors='ignore')
-            
-            # Read UVs (6 floats: u1, u2, u3, v1, v2, v3)
-            uv_data = struct.unpack('<6f', f.read(24))
-            # Convert to per-vertex UVs (per-face format)
-            uvs.append(mathutils.Vector((uv_data[0], uv_data[3])))  # u1, v1
-            uvs.append(mathutils.Vector((uv_data[1], uv_data[4])))  # u2, v2
-            uvs.append(mathutils.Vector((uv_data[2], uv_data[5])))  # u3, v3
-    
+    """Decode the SCB container in Rust; adapt coordinates for Blender."""
+    source = require_ritoshark().Scb.from_path(str(filepath))
+    if source.version not in ((2, 1), (2, 2), (3, 1), (3, 2)):
+        raise ValueError(f'Unsupported SCB version: {source.version}')
+    vertices = [mathutils.Vector((-x, -z, y)) for x, y, z in struct.iter_unpack('<3f', source.positions)]
+    colors = [(r / 255, g / 255, b / 255, a / 255)
+              for b, g, r, a in struct.iter_unpack('4B', source.colors or b'')]
+    indices, uvs, materials, source_indices = [], [], [], []
+    for face in source.faces:
+        source_indices.extend(face.indices)
+        if len(set(face.indices)) != 3:
+            continue
+        indices.extend(face.indices)
+        uvs.extend(mathutils.Vector(uv) for uv in face.uvs)
+        materials.append(face.material)
+    cx, cy, cz = source.central
     return {
         'name': os.path.splitext(os.path.basename(filepath))[0],
-        'vertices': vertices,
-        'indices': indices,
-        'uvs': uvs,
-        'colors': colors,
-        'material': material or 'lambert69',
-        'central': central,
-        'scb_flag': scb_flag
+        'vertices': vertices, 'indices': indices, 'uvs': uvs, 'colors': colors,
+        'material': materials[-1] if materials else 'lambert69',
+        'central': mathutils.Vector((-cx, -cz, cy)),
+        'scb_flag': source.flags, 'file_name': source.name, 'materials': materials,
+        'trailing': source.trailing, 'source_indices': source_indices, 'version': source.version,
     }
 
 def create_mesh(scb_data):
@@ -133,14 +73,23 @@ def create_mesh(scb_data):
     # Per-vertex colors (POINT domain, indexed by vertex like the SCB file)
     colors = scb_data.get('colors')
     if colors and len(colors) == len(vertices):
-        ca = mesh.color_attributes.new('Color', 'FLOAT_COLOR', 'POINT')
-        flat = [c for col in colors for c in col]
-        ca.data.foreach_set('color', flat)
+        ca = mesh.color_attributes.new('Color', 'BYTE_COLOR', 'POINT')
+        for item, color in zip(ca.data, colors):
+            item.color_srgb = color
 
-    # Material
-    mat = bpy.data.materials.new(name=scb_data['material'])
-    mat.use_nodes = True
-    mesh.materials.append(mat)
+    slots = {}
+    for polygon, name in zip(mesh.polygons, scb_data['materials']):
+        if name not in slots:
+            slots[name] = len(mesh.materials)
+            mat = bpy.data.materials.new(name)
+            mat.use_nodes = True
+            mat['lol_material_name'] = name
+            mesh.materials.append(mat)
+        polygon.material_index = slots[name]
+    mesh['lol_scb_version'] = scb_data['version']
+    mesh['lol_scb_name'] = scb_data['file_name']
+    mesh['lol_scb_trailing'] = base64.b64encode(scb_data['trailing']).decode('ascii')
+    mesh['lol_scb_indices'] = json.dumps(scb_data['source_indices'])
 
     return mesh
 

@@ -610,7 +610,7 @@ def _load_image(disk_path, cache):
     img = None
     try:
         load_path = disk_path
-        if disk_path.lower().endswith('.tex'):
+        if disk_path.lower().endswith(('.tex', '.dds')):
             from ..utils.texture_manager import load_tex_image
             img = load_tex_image(disk_path)
         else:

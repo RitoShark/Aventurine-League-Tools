@@ -558,17 +558,18 @@ def apply_anm(anm, armature_obj, frame_offset=0, flip=False, adapt_to_edits=Fals
                     if not fc:
                         fc = fcurves_collection.new(data_path, index=i, action_group=bone_name)
                         
-                    # Allocate all points instantaneously
-                    fc.keyframe_points.add(len(sorted_frames))
-                    
-                    # Interleave frame numbers and values into a flat float array
-                    coords = [0.0] * (len(sorted_frames) * 2)
-                    for k, frame in enumerate(sorted_frames):
-                        coords[k*2] = float(frame)
-                        coords[k*2 + 1] = float(frames_dict[frame][i])
-                        
-                    # Inject into C memory directly
-                    fc.keyframe_points.foreach_set('co', coords)
+                    if len(fc.keyframe_points):
+                        # Insert replaces matching frames and preserves keys/handles
+                        # outside the inserted clip. foreach_set requires the entire
+                        # collection, so it is only safe on a new, empty curve.
+                        for frame in sorted_frames:
+                            fc.keyframe_points.insert(
+                                float(frame), float(frames_dict[frame][i]), options={'FAST'})
+                    else:
+                        fc.keyframe_points.add(len(sorted_frames))
+                        coords = [value for frame in sorted_frames
+                                  for value in (float(frame), float(frames_dict[frame][i]))]
+                        fc.keyframe_points.foreach_set('co', coords)
                     fc.update()
                     
                     total_keyframes += len(sorted_frames)

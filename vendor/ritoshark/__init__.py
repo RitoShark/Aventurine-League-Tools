@@ -8,6 +8,7 @@ __all__ = [
     "AnimFrame",
     "AnimTrack",
     "Anm",
+    "Dds",
     "FormatError",
     "Joint",
     "MapGeo",

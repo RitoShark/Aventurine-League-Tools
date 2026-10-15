@@ -26,7 +26,7 @@ class ExportSCO(Operator, ExportHelper):
     scale_factor: FloatProperty(
         name="Scale Factor",
         description="Scale factor for export (0.01 = 1% of original size)",
-        default=0.01,
+        default=1.0,
         min=0.0001,
         max=100.0
     )
@@ -180,13 +180,13 @@ class ExportSCO(Operator, ExportHelper):
         # Calculate central point: object origin in world space (pivot point)
         # This matches Maya: transform.getTranslation(MSpace.kTransform)
         origin_world = eval_obj.matrix_world.translation
-        central_world = origin_world
+        central_world = eval_obj.matrix_world @ Vector(obj['lol_sco_central']) if 'lol_sco_central' in obj else origin_world
         
         # Find pivot bone (if exists) - pass depsgraph and eval_mesh to avoid recreating
         pivot_bone_world = self.find_pivot_bone(context, obj, depsgraph, eval_mesh)
         
         # Scale to SCB units (before coordinate transform)
-        scale_inv = 1.0 / scale_factor
+        scale_inv = scale_factor
         vertices_scaled = [v * scale_inv for v in vertices_world]
         central_scaled = central_world * scale_inv
         
@@ -218,6 +218,10 @@ class ExportSCO(Operator, ExportHelper):
             # Pivot is stored as: central - bone_position (offset from central)
             pivot_scb = central_scb - pivot_scb_transformed
         
+        elif 'lol_sco_pivot' in obj:
+            pivot = eval_obj.matrix_world.to_3x3() @ Vector(obj['lol_sco_pivot']) * scale_factor
+            pivot_scb = Vector((-pivot.x, pivot.z, -pivot.y))
+
         # Get UV layer
         if not eval_mesh.uv_layers.active:
             raise ValueError("Mesh has no UV coordinates")
@@ -241,6 +245,7 @@ class ExportSCO(Operator, ExportHelper):
         # Get faces and UVs from bmesh
         faces = []
         face_uvs = []
+        face_materials = []
         
         # Update vertex indices to match our vertex list
         bm.verts.ensure_lookup_table()
@@ -254,6 +259,8 @@ class ExportSCO(Operator, ExportHelper):
             # Get vertex indices
             face_indices = [v.index for v in face.verts]
             faces.append(face_indices)
+            material = eval_mesh.materials[face.material_index] if face.material_index < len(eval_mesh.materials) else None
+            face_materials.append(material.get('lol_material_name', material.name) if material else 'lambert69')
             
             # Get UVs for this face (per-face format)
             face_uv = []
@@ -298,6 +305,7 @@ class ExportSCO(Operator, ExportHelper):
             face_count = len(faces)
             f.write(f'Faces= {face_count}\n')
             for i, face in enumerate(faces):
+                material_name = face_materials[i]
                 # Write face: 3 <idx0> <idx1> <idx2> <material> <u1> <v1> <u2> <v2> <u3> <v3>
                 face_uv = face_uvs[i]
                 f.write('3\t')

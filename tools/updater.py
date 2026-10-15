@@ -10,6 +10,8 @@ import zipfile
 import threading
 import tempfile
 import time
+from pathlib import Path
+from .update_install import release_asset, install_release
 
 REPO_OWNER = "RitoShark"
 REPO_NAME = "Aventurine-League-Tools"
@@ -148,7 +150,7 @@ def _fetch_releases_thread():
             'Pragma': 'no-cache'
         })
 
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             all_releases = json.loads(response.read().decode())
 
         if not all_releases:
@@ -181,6 +183,9 @@ class LOL_OT_CheckForUpdates(bpy.types.Operator):
         prefs = context.preferences.addons[addon_name].preferences
 
         # Reset status
+        if prefs.update_in_progress:
+            self.report({'WARNING'}, "Wait for the current update to finish")
+            return {'CANCELLED'}
         prefs.update_status = "Checking for updates..."
         prefs.update_available = False
         prefs.update_in_progress = False
@@ -203,7 +208,7 @@ class LOL_OT_CheckForUpdates(bpy.types.Operator):
                 'Pragma': 'no-cache'
             })
 
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=30) as response:
                 latest = json.loads(response.read().decode())
 
             tag_name = latest.get('tag_name', '').strip()
@@ -218,15 +223,7 @@ class LOL_OT_CheckForUpdates(bpy.types.Operator):
             from .. import bl_info
             current_version = bl_info['version']
 
-            # Find best download URL
-            download_url = latest.get('zipball_url', '')
-            for asset in latest.get('assets', []):
-                if asset['name'].endswith('.zip'):
-                    if "aventurine" in asset['name'].lower():
-                        download_url = asset['browser_download_url']
-                        break
-                    if download_url == latest.get('zipball_url', ''):
-                        download_url = asset['browser_download_url']
+            download_url = release_asset(latest)
 
             is_newer = new_version > current_version
 
@@ -276,19 +273,19 @@ class LOL_OT_UpdateAddon(bpy.types.Operator):
 
         thread = threading.Thread(
             target=self._install_thread,
-            args=(url, version),
+            args=(url, version, str(Path(__file__).resolve().parents[1])),
             daemon=True
         )
         thread.start()
 
         return {'FINISHED'}
 
-    def _install_thread(self, url, version):
+    def _install_thread(self, url, version, target_path):
         try:
             _set_download_status("Downloading...", active=True)
 
             req = urllib.request.Request(url, headers={'User-Agent': 'Blender-Aventurine-Updater'})
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=30) as response:
                 total = response.headers.get('Content-Length')
                 total = int(total) if total else None
 
@@ -317,70 +314,13 @@ class LOL_OT_UpdateAddon(bpy.types.Operator):
             _set_download_status("Installing...", active=False)
             _set_prefs(update_status="Installing...", update_in_progress=True)
 
-            tmp_dir = tempfile.gettempdir()
-            zip_path = os.path.join(tmp_dir, "aventurine_update.zip")
-            extract_dir = os.path.join(tmp_dir, "aventurine_extract")
-
-            with open(zip_path, 'wb') as f:
-                f.write(data)
-
-            # Extract
-            if os.path.exists(extract_dir):
-                shutil.rmtree(extract_dir, ignore_errors=True)
-            os.makedirs(extract_dir, exist_ok=True)
-
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
-
-            # Find the addon root inside the zip
-            source_path = None
-            for item in os.listdir(extract_dir):
-                item_path = os.path.join(extract_dir, item)
-                if os.path.isdir(item_path) and "__init__.py" in os.listdir(item_path):
-                    source_path = item_path
-                    break
-
-            if not source_path:
-                _set_prefs(
-                    update_status="Install failed: no valid addon found in zip",
-                    update_in_progress=False
-                )
-                return
-
-            # Target directory - keep current folder name so it stays enabled
-            addon_name = __package__.split('.')[0]
-            addons_dir = bpy.utils.user_resource('SCRIPTS', path="addons")
-            target_path = os.path.join(addons_dir, addon_name)
-
-            _set_prefs(update_status="Swapping addon files...")
-
-            # Rename current -> backup, move new -> target
-            backup_path = os.path.join(addons_dir, f"{addon_name}_old_{int(time.time())}")
-
-            if os.path.exists(target_path):
-                try:
-                    os.rename(target_path, backup_path)
-                except Exception:
-                    # Rename failed (locked files), overwrite in-place
-                    _set_prefs(update_status="Files locked, overwriting in-place...")
-                    shutil.copytree(source_path, target_path, dirs_exist_ok=True)
-                    backup_path = None
-
-            if backup_path and os.path.exists(backup_path):
-                shutil.move(source_path, target_path)
-                # Try to clean backup immediately
-                try:
-                    shutil.rmtree(backup_path)
-                except Exception:
-                    # Will be cleaned on next startup
-                    pass
-
-            # Cleanup temp files
-            try:
-                os.remove(zip_path)
-                shutil.rmtree(extract_dir, ignore_errors=True)
-            except Exception:
-                pass
+            # The archive and extracted candidate are disposable; the active installation
+            # is changed only by the validated directory swap in install_release.
+            with tempfile.TemporaryDirectory(prefix='aventurine-download-') as temp:
+                zip_path = Path(temp) / 'update.zip'
+                zip_path.write_bytes(data)
+                _set_prefs(update_status="Installing validated update...")
+                install_release(zip_path, target_path, version)
 
             _set_prefs(
                 update_available=False,
@@ -391,7 +331,7 @@ class LOL_OT_UpdateAddon(bpy.types.Operator):
         except Exception as e:
             _set_download_status("", active=False)
             _set_prefs(
-                update_status=f"Update failed: {e}",
+                update_status=f"Update failed: {e}. Close Blender and install the release ZIP manually if files are locked.",
                 update_in_progress=False
             )
 

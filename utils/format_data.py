@@ -8,7 +8,7 @@ def packed(code, rows):
     return struct.pack(f'<{len(values)}{code}', *values)
 
 
-def write_skin(filepath, submeshes):
+def write_skin(filepath, submeshes, **metadata):
     rs = require_ritoshark()
     vertices = [vertex for submesh in submeshes for vertex in submesh['vertices']]
     rs.Skn.new(
@@ -18,6 +18,11 @@ def write_skin(filepath, submeshes):
         blend_indices=packed('I', (v['inf'] for v in vertices)),
         blend_weights=packed('f', (v['weight'] for v in vertices)),
         indices=packed('I', (sm['indices'] for sm in submeshes)),
+        colors=(bytes(c for v in vertices for c in v.get('color', (255, 255, 255, 255)))
+                if any('color' in v or 'tangent' in v for v in vertices) else None),
+        tangents=(packed('f', (v['tangent'] for v in vertices))
+                  if any('tangent' in v for v in vertices) else None),
+        **metadata,
         submeshes=[rs.Submesh(sm['name'], sm['vertex_start'], sm['vertex_count'],
                              sm['index_start'], sm['index_count']) for sm in submeshes],
     ).to_path(str(filepath))
@@ -71,7 +76,7 @@ def textures_from_bin(document):
             if not texture:
                 material = entries.get(override.get(0xd2e4d060), {})
                 for sampler in material.get(0x0a6f0eb5, []) or []:
-                    if isinstance(sampler, dict) and sampler.get(0xb311d4ef) == 'Diffuse_Texture':
+                    if isinstance(sampler, dict) and str(sampler.get(0xb311d4ef) or sampler.get(0x02e7fb4c, '')).casefold() == 'diffuse_texture':
                         texture = sampler.get(0xf0a363e3, '')
                         if texture:
                             break

@@ -3,13 +3,36 @@ import mathutils
 import struct
 import os
 import re
+import base64
+import hashlib
 from ..utils.format_data import write_skin
 from . import import_skl
 from . import bone_utils
 
+def _corner_normals(mesh):
+    if hasattr(mesh, 'calc_normals_split'):
+        mesh.calc_normals_split()
+    if hasattr(mesh, 'corner_normals'):
+        return [normal.vector.copy() for normal in mesh.corner_normals]
+    return [loop.normal.copy() for loop in mesh.loops]
+
+
 def clean_blender_name(name):
     """Remove Blender's .001, .002 etc. suffixes from names"""
     return re.sub(r'\.\d{3}$', '', name)
+
+
+def tangent_basis_signature(mesh):
+    """Detect mesh edits that invalidate imported tangent attributes."""
+    digest = hashlib.sha256()
+    for vertex in mesh.vertices:
+        digest.update(struct.pack('<3f', *vertex.co))
+    normals = _corner_normals(mesh)
+    uvs = mesh.uv_layers.active
+    for loop in mesh.loops:
+        digest.update(struct.pack('<I3f2f', loop.vertex_index, *normals[loop.index],
+                                  *(uvs.data[loop.index].uv if uvs else (0, 0))))
+    return digest.hexdigest()
 
 def check_shared_vertices_between_materials(mesh_obj):
     """
@@ -42,7 +65,7 @@ def check_shared_vertices_between_materials(mesh_obj):
     return list(shared_materials)
 
 
-def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, material_index=None, disable_scaling=False, disable_transforms=False, deformed_positions=None, deformed_poly_normals=None, apply_object_transform=True, model_scale=1.0):
+def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, material_index=None, disable_scaling=False, disable_transforms=False, deformed_positions=None, deformed_loop_normals=None, apply_object_transform=True, model_scale=1.0, export_tangents=False):
     """
     Collect geometry data from a single mesh object.
     If material_index is specified, only collect triangles belonging to that material.
@@ -89,6 +112,18 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
     if not mesh.uv_layers.active:
         raise Exception(f"Mesh '{mesh_obj.name}' has no active UV layer")
     uv_data = mesh.uv_layers.active.data
+    colors = mesh.color_attributes.active_color
+    tangents = mesh.attributes.get('SKNTangent')
+    tangent_signs = mesh.attributes.get('SKNTangentSign')
+    if export_tangents and mesh_obj.get('lol_skn_tangent_basis') != tangent_basis_signature(mesh):
+        tangents = tangent_signs = None
+    if export_tangents and (tangents is None or tangent_signs is None or deformed_positions is not None):
+        if deformed_positions is not None:
+            raise ValueError('Apply the visual pose before exporting a mesh with SKN tangents')
+        mesh.calc_tangents(uvmap=mesh.uv_layers.active.name)
+        tangents = tangent_signs = None
+    if export_tangents and tangents is not None and (tangents.domain != 'CORNER' or tangent_signs.domain != 'CORNER'):
+        raise ValueError('SKN tangent attributes must use the face-corner domain')
 
     # Filter polygons by material index if specified
     if material_index is not None:
@@ -99,31 +134,15 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
     if not filtered_polys:
         return None
 
-    # === PHASE 0: Pre-calculate normals per mesh vertex (like Maya does) ===
-    # Calculate averaged normals for each mesh vertex before UV splitting
-    vertex_normals = {}
-    for poly in filtered_polys:
-        for v_idx in poly.vertices:
-            if v_idx not in vertex_normals:
-                vertex_normals[v_idx] = []
-            # Use deformed face normal if available (for visual pose export)
-            normal = deformed_poly_normals.get(poly.index, poly.normal) if deformed_poly_normals else poly.normal
-            vertex_normals[v_idx].append(normal)
-    
-    # Average the normals for each vertex
-    averaged_normals = {}
-    for v_idx, normals_list in vertex_normals.items():
-        avg = mathutils.Vector((0, 0, 0))
-        for n in normals_list:
-            avg += n
-        avg.normalize()
-        averaged_normals[v_idx] = avg
+    # Preserve authored corner normals, splitting vertices at both UV and normal seams.
+    loop_normals = deformed_loop_normals if deformed_loop_normals is not None else _corner_normals(mesh)
+    normal_matrix = world_to_armature.to_3x3().inverted_safe().transposed()
+    if world_to_armature.to_3x3().determinant() < 0:
+        normal_matrix = -normal_matrix
 
-    # === PHASE 1: Build unique vertices based on (vertex_index, UV) pairs ===
-    # This is the key fix: a vertex with multiple UVs (at UV seams) becomes multiple SKN vertices
-    # Map: (v_idx, uv_key) -> new_vertex_index
     unique_verts = {}
     submesh_vertices = []
+    loop_to_vertex = {}
 
     # For each vertex, collect all unique UVs from loops that use it
     for poly in filtered_polys:
@@ -133,7 +152,19 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
             # Round UV to create stable key (avoid float comparison issues)
             uv_key = (round(uv[0], 6), round(uv[1], 6))
 
-            vert_key = (v_idx, uv_key)
+            normal = loop_normals[loop_idx]
+            color = None
+            if colors is not None:
+                color_index = loop_idx if colors.domain == 'CORNER' else v_idx
+                r, g, b, a = colors.data[color_index].color_srgb
+                color = tuple(max(0, min(255, round(c * 255))) for c in (b, g, r, a))
+            tangent = None
+            if export_tangents:
+                vector = tangents.data[loop_idx].vector if tangents else mesh.loops[loop_idx].tangent
+                sign = tangent_signs.data[loop_idx].value if tangent_signs else mesh.loops[loop_idx].bitangent_sign
+                vector = (world_to_armature.to_3x3() @ vector).normalized()
+                tangent = ((*vector, -sign) if disable_transforms else (-vector.x, vector.z, -vector.y, -sign))
+            vert_key = (v_idx, uv_key, tuple(round(c, 6) for c in normal), color, tangent)
 
             if vert_key not in unique_verts:
                 v = mesh.vertices[v_idx]
@@ -146,14 +177,7 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
                 else:
                     v_L = mathutils.Vector((-v_B.x * scale, v_B.z * scale, -v_B.y * scale))
 
-                # Normal - use pre-calculated averaged normal for this mesh vertex
-                if v_idx in averaged_normals:
-                    n_B = averaged_normals[v_idx]
-                else:
-                    # Fallback
-                    n_B = mesh.loops[loop_idx].normal
-                
-                n_A = (world_to_armature.to_3x3() @ n_B).normalized()
+                n_A = (normal_matrix @ normal).normalized()
                 if disable_transforms:
                     n_L = mathutils.Vector((n_A.x, n_A.y, n_A.z))
                 else:
@@ -188,22 +212,17 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
                     'normal': n_L,
                     'uv': (uv[0], 1.0 - uv[1])
                 })
+                if color is not None:
+                    submesh_vertices[-1]['color'] = color
+                if tangent is not None:
+                    submesh_vertices[-1]['tangent'] = tangent
+            loop_to_vertex[loop_idx] = unique_verts[vert_key]
 
-    # === PHASE 2: Build triangle indices using the unique vertex mapping ===
-    # For each triangle, look up the correct SKN vertex using (vertex_index, UV) key
+    # Use Blender's triangulation, including concave polygons.
     submesh_indices = []
-
-    for poly in filtered_polys:
-        loop_indices = list(poly.loop_indices)
-        # Triangulate polygon using fan method
-        for i in range(1, len(loop_indices) - 1):
-            tri_loops = [loop_indices[0], loop_indices[i], loop_indices[i + 1]]
-            for loop_idx in tri_loops:
-                v_idx = mesh.loops[loop_idx].vertex_index
-                uv = uv_data[loop_idx].uv
-                uv_key = (round(uv[0], 6), round(uv[1], 6))
-                vert_key = (v_idx, uv_key)
-                submesh_indices.append(unique_verts[vert_key])
+    for triangle in mesh.loop_triangles:
+        if material_index is None or triangle.material_index == material_index:
+            submesh_indices.extend(loop_to_vertex[i] for i in triangle.loops)
 
     return {
         'name': submesh_name,
@@ -256,12 +275,25 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
                 continue
             eval_obj = obj.evaluated_get(depsgraph)
             eval_mesh = eval_obj.to_mesh()
+            if (len(eval_mesh.vertices) != len(obj.data.vertices)
+                    or [loop.vertex_index for loop in eval_mesh.loops]
+                    != [loop.vertex_index for loop in obj.data.loops]):
+                eval_obj.to_mesh_clear()
+                bpy.context.scene.frame_set(current_frame)
+                raise ValueError(f"Mesh '{obj.name}' has topology-changing modifiers; apply them before visual-pose export")
             positions = {vi: eval_mesh.vertices[vi].co.copy() for vi in range(len(eval_mesh.vertices))}
-            poly_normals = {p.index: p.normal.copy() for p in eval_mesh.polygons}
-            deformed_data[obj.name] = (positions, poly_normals)
+            loop_normals = _corner_normals(eval_mesh)
+            deformed_data[obj.name] = (positions, loop_normals)
             eval_obj.to_mesh_clear()
         bpy.context.scene.frame_set(current_frame)
 
+    source_metadata = {(int(obj.get('lol_skn_flags', 0)), obj.get('lol_skn_prefix', ''),
+                        obj.get('lol_skn_trailing', base64.b64encode(bytes(12)).decode('ascii')))
+                       for obj in mesh_objects if obj.type == 'MESH' and 'lol_skn_flags' in obj}
+    if len(source_metadata) > 1:
+        raise ValueError('Selected meshes have incompatible SKN file metadata; export them separately')
+    flags, prefix, trailing = next(iter(source_metadata), (0, '', base64.b64encode(bytes(12)).decode('ascii')))
+    export_tangents = any(obj.get('lol_skn_has_tangents', False) for obj in mesh_objects)
     submesh_data = []
     total_vertex_count = 0
     total_index_count = 0
@@ -287,13 +319,13 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
                 if material is None:
                     submesh_name = mesh_obj.name
                 else:
-                    submesh_name = material.name
+                    submesh_name = material.get('lol_material_name', material.name)
 
                 # Clean up Maya-style "mesh_" prefix
                 if submesh_name.startswith("mesh_"):
                     submesh_name = submesh_name[5:]
 
-                if clean_names:
+                if clean_names and (material is None or 'lol_material_name' not in material):
                     submesh_name = clean_blender_name(submesh_name)
 
                 data = collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name,
@@ -301,9 +333,9 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
                                         disable_scaling=disable_scaling,
                                         disable_transforms=disable_transforms,
                                         deformed_positions=deformed_pos,
-                                        deformed_poly_normals=deformed_norms,
+                                        deformed_loop_normals=deformed_norms,
                                         apply_object_transform=apply_object_transform,
-                                        model_scale=model_scale)
+                                        model_scale=model_scale, export_tangents=export_tangents)
 
                 if data is None or not data['indices']:
                     continue
@@ -334,9 +366,9 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
                                     disable_scaling=disable_scaling,
                                     disable_transforms=disable_transforms,
                                     deformed_positions=deformed_pos,
-                                    deformed_poly_normals=deformed_norms,
+                                    deformed_loop_normals=deformed_norms,
                                     apply_object_transform=apply_object_transform,
-                                    model_scale=model_scale)
+                                    model_scale=model_scale, export_tangents=export_tangents)
 
             if data is None or not data['indices']:
                 continue
@@ -400,7 +432,8 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
             v['inf'] = [joint_to_palette[b] if w > 0 else 0
                         for b, w in zip(v['inf'], v['weight'])]
 
-    write_skin(filepath, submesh_data)
+    write_skin(filepath, submesh_data, flags=flags, prefix_block=base64.b64decode(prefix, validate=True),
+               trailing=base64.b64decode(trailing, validate=True))
 
     return len(submesh_data), total_vertex_count, influences
 

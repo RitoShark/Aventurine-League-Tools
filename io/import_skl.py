@@ -10,7 +10,7 @@ EXPORT_SCALE = 1.0 / IMPORT_SCALE  # = 100, to scale back up for export
 
 class SKLJoint:
     __slots__ = ('name', 'parent', 'local_translation', 'local_scale', 'local_rotation', 'global_pos',
-                 'raw_trans', 'raw_rot', 'raw_scale')
+                 'raw_trans', 'raw_rot', 'raw_scale', 'flags', 'radius')
     
     def __init__(self):
         self.name = None
@@ -23,18 +23,39 @@ class SKLJoint:
         self.raw_trans = None
         self.raw_rot = None
         self.raw_scale = None
+        self.flags = 0
+        self.radius = 2.1
+
+
+class SKLJoints(list):
+    pass
 
 
 def read_skl(filepath):
     skeleton = require_ritoshark().Skl.from_path(str(filepath))
     source = skeleton.joints
     index_by_id = {joint.id: index for index, joint in enumerate(source)}
-    joints = []
+    if len(index_by_id) != len(source) or len({joint.name for joint in source}) != len(source):
+        raise ValueError('SKL contains duplicate joint IDs or names')
+    # Validate ancestry before the recursive global-transform calculation.
+    completed = set()
+    for item in source:
+        current = item.id
+        chain = set()
+        while current != -1 and current not in completed:
+            if current in chain or current not in index_by_id:
+                raise ValueError('SKL contains a cyclic or missing parent')
+            chain.add(current)
+            current = source[index_by_id[current]].parent_id
+        completed.update(chain)
+    joints = SKLJoints()
+    joints.name, joints.asset, joints.flags = skeleton.name, skeleton.asset, skeleton.flags
     P = mathutils.Matrix(((-1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
     P_inv = P.inverted()
     for item in source:
         joint = SKLJoint()
         joint.name = item.name
+        joint.flags, joint.radius = item.flags, item.radius
         joint.parent = -1 if item.parent_id == -1 else index_by_id[item.parent_id]
         joint.raw_trans = mathutils.Vector(item.local_translation)
         joint.raw_scale = mathutils.Vector(item.local_scale)
@@ -89,6 +110,9 @@ def create_armature(joints, name="Armature", bone_orient='VISUAL'):
     
     armature_data = bpy.data.armatures.new(name)
     armature_obj = bpy.data.objects.new(name, armature_data)
+    armature_obj['lol_skl_name'] = getattr(joints, 'name', '')
+    armature_obj['lol_skl_asset'] = getattr(joints, 'asset', '')
+    armature_obj['lol_skl_flags'] = getattr(joints, 'flags', 0)
     bpy.context.scene.collection.objects.link(armature_obj)
     bpy.context.view_layer.objects.active = armature_obj
     
@@ -225,6 +249,8 @@ def _store_native_props(joints, mats, armature_obj):
         pbone["native_bind_s"] = [joint.raw_scale.x, joint.raw_scale.y, joint.raw_scale.z]
         # Store original bone index for stable export ordering
         pbone["native_bone_index"] = i
+        pbone["lol_joint_flags"] = joint.flags
+        pbone["lol_joint_radius"] = joint.radius
         # Store original parent name so animation correction can find the right
         # C_parent even if the user reparents bones in Blender
         if joint.parent >= 0:

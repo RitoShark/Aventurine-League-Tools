@@ -27,7 +27,6 @@ class Skn:
     def from_bytes(data: bytes) -> Skn: ...
     @staticmethod
     def new(
-        *,
         positions: bytes,
         normals: bytes,
         uvs: bytes,
@@ -35,9 +34,29 @@ class Skn:
         blend_weights: bytes,
         indices: bytes,
         submeshes: list[Submesh],
+        *,
+        colors: bytes | None = None,
+        tangents: bytes | None = None,
+        flags: int = 0,
+        prefix_block: bytes | None = None,
+        trailing: bytes | None = None,
     ) -> Skn:
-        """Builds a new .skn from packed buffers. `indices` values above 65535 or
-        `blend_indices` values above 255 raise WriteError."""
+        """Build a v4.1 mesh from absolute indices and finite packed buffers.
+        Flag 2 encodes indices relative to each submesh on disk. Encoded indices
+        above 65535 or influence slots above 255 raise WriteError. Tangents require
+        BGRA colors; prefix bytes require flag 1. Bounds are computed from positions."""
+    @property
+    def flags(self) -> int: ...
+    @property
+    def colors(self) -> bytes | None:
+        """Raw four-byte BGRA color values per vertex."""
+    @property
+    def tangents(self) -> bytes | None:
+        """Four little-endian float32 values per vertex."""
+    @property
+    def prefix_block(self) -> bytes: ...
+    @property
+    def trailing(self) -> bytes: ...
     @property
     def version(self) -> tuple[int, int]: ...
     @property
@@ -83,8 +102,19 @@ class Scb:
     @staticmethod
     def from_bytes(data: bytes) -> Scb: ...
     @staticmethod
-    def new(name: str, positions: bytes, faces: list[ScbFace]) -> Scb: ...
-    def replace_geometry(self, positions: bytes, faces: list[ScbFace]) -> None:
+    def new(name: str, positions: bytes, faces: list[ScbFace], *,
+            central: tuple[float, float, float] | None = None, colors: bytes | None = None,
+            flags: int = 0, trailing: bytes | None = None, version: tuple[int, int] = (3, 2)) -> Scb: ...
+    @property
+    def version(self) -> tuple[int, int]: ...
+    @property
+    def flags(self) -> int: ...
+    @property
+    def colors(self) -> bytes | None:
+        """Four raw BGRA bytes per vertex, or None."""
+    @property
+    def trailing(self) -> bytes: ...
+    def replace_geometry(self, positions: bytes, faces: list[ScbFace], recompute_bounds: bool = False) -> None:
         """Swaps in new geometry while preserving what a caller cannot reconstruct: the
         container version, the raw flag word, the vertexType word, per-vertex colors, and the
         opaque trailing block holding per-face VCP data and the local-origin/pivot vectors.
@@ -159,7 +189,10 @@ class Skl:
         influences: list[int],
         name: str = "",
         asset: str = "",
+        flags: int = 0,
     ) -> Skl: ...
+    @property
+    def flags(self) -> int: ...
     @property
     def name(self) -> str: ...
     @property
@@ -211,6 +244,18 @@ class Anm:
     def tracks(self) -> list[AnimTrack]: ...
     def to_bytes(self) -> bytes: ...
     def to_path(self, path: str) -> None: ...
+
+class Dds:
+    @staticmethod
+    def from_path(path: str) -> Dds: ...
+    @staticmethod
+    def from_bytes(data: bytes) -> Dds: ...
+    @property
+    def width(self) -> int: ...
+    @property
+    def height(self) -> int: ...
+    @property
+    def rgba(self) -> bytes: ...
 
 class Tex:
     """Textures have no writer: .tex encoding is out of scope for the Python bindings."""
