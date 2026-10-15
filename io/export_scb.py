@@ -5,7 +5,10 @@ Native SCB (Static Object Binary) exporter for League of Legends
 
 import bpy
 import os
-import struct
+from ..utils.backend import require_ritoshark
+from ..utils.format_data import packed
+import base64
+import json
 import math
 from bpy.types import Operator
 from bpy.props import StringProperty, FloatProperty, BoolProperty
@@ -118,42 +121,15 @@ class ExportSCB(Operator, ExportHelper):
         return None
     
     def read_riot_scb(self, path):
-        """Read only central point and flag from riot.scb"""
-        try:
-            with open(path, 'rb') as f:
-                # Skip to central point
-                f.seek(8)  # Magic
-                major, minor = struct.unpack('<HH', f.read(4))
-                f.seek(128)  # Name padding
-                vertex_count, face_count, scb_flag = struct.unpack('<III', f.read(12))
-                f.seek(24)  # Bounding box
-                
-                if major == 3 and minor == 2:
-                    vertex_type = struct.unpack('<I', f.read(4))[0]
-                    f.seek(vertex_count * 12, 1)  # Vertices
-                    if vertex_type == 1:
-                        f.seek(vertex_count * 4, 1)  # Vertex colors
-                else:
-                    f.seek(vertex_count * 12, 1)  # Vertices
-                
-                # Read central point (don't swap here, will swap during export)
-                cx, cy, cz = struct.unpack('<fff', f.read(12))
-                central = Vector((cx, cy, cz))
-                
-                return {
-                    'central': central,  # Will be swapped during export
-                    'scb_flag': scb_flag
-                }
-        except Exception as e:
-            print(f"[export_scb] WARNING: Could not read riot.scb: {e}")
-            return None
-    
+        """Read reference metadata through the same Rust SCB parser."""
+        source = require_ritoshark().Scb.from_path(str(path))
+        return {'central': Vector(source.central), 'scb_flag': source.flags}
+
     def collect_vertex_colors(self, mesh, vertex_count):
         """Return a per-vertex list of (r, g, b, a) bytes (0-255), or None.
 
         SCB stores exactly one color per vertex. A POINT-domain color
-        attribute maps directly; a CORNER (per-loop) attribute is reduced to
-        per-vertex by taking the first loop that touches each vertex.
+        attribute maps directly. Conflicting CORNER colors require split vertices.
         """
         if not mesh.color_attributes:
             return None
@@ -166,16 +142,18 @@ class ExportSCB(Operator, ExportHelper):
 
         if ca.domain == 'POINT':
             if len(ca.data) != vertex_count:
-                return None
-            return [to_bytes(ca.data[i].color) for i in range(vertex_count)]
+                raise ValueError('SCB vertex color count does not match the mesh')
+            return [to_bytes(ca.data[i].color_srgb) for i in range(vertex_count)]
 
         if ca.domain == 'CORNER':
             colors = [None] * vertex_count
             for poly in mesh.polygons:
                 for loop_idx in poly.loop_indices:
                     vi = mesh.loops[loop_idx].vertex_index
-                    if colors[vi] is None:
-                        colors[vi] = to_bytes(ca.data[loop_idx].color)
+                    color = to_bytes(ca.data[loop_idx].color_srgb)
+                    if colors[vi] is not None and colors[vi] != color:
+                        raise ValueError('SCB stores one color per vertex; split vertices at color seams before exporting')
+                    colors[vi] = color
             # Fill any unreferenced vertices with opaque white
             return [c if c is not None else (255, 255, 255, 255) for c in colors]
 
@@ -261,6 +239,7 @@ class ExportSCB(Operator, ExportHelper):
         # Get faces and UVs from bmesh
         faces = []
         face_uvs = []
+        face_materials = []
         
         # Update vertex indices to match our vertex list
         bm.verts.ensure_lookup_table()
@@ -274,6 +253,8 @@ class ExportSCB(Operator, ExportHelper):
             # Get vertex indices
             face_indices = [v.index for v in face.verts]
             faces.append(face_indices)
+            material = eval_mesh.materials[face.material_index] if face.material_index < len(eval_mesh.materials) else None
+            face_materials.append(material.get('lol_material_name', material.name) if material else 'lambert69')
             
             # Get UVs for this face (per-face format)
             face_uv = []
@@ -294,7 +275,7 @@ class ExportSCB(Operator, ExportHelper):
                 material_name = material_name[:64]
         
         # Get SCB flag
-        scb_flag = 2  # Default: local origin locator
+        scb_flag = 0  # New files have no optional trailing sections
         if riot_data:
             scb_flag = riot_data['scb_flag']
         elif 'lol_scb_flag' in obj:
@@ -306,65 +287,31 @@ class ExportSCB(Operator, ExportHelper):
         # vertex indices), so a POINT-domain color attribute aligns 1:1.
         vertex_colors = self.collect_vertex_colors(eval_mesh, len(vertices))
 
-        # Write SCB file
-        with open(filepath, 'wb') as f:
-            # Write magic
-            f.write(b'r3d2Mesh')
-            
-            # Write version (3.2)
-            f.write(struct.pack('<HH', 3, 2))
-            
-            # Write name padding (128 bytes)
-            f.write(b'\x00' * 128)
-            
-            # Write counts and flag
-            face_count = len(faces)
-            f.write(struct.pack('<III', len(vertices), face_count, scb_flag))
-            
-            # Calculate bounding box
-            if vertices:
-                min_bb = Vector((min(v.x for v in vertices), 
-                                min(v.y for v in vertices), 
-                                min(v.z for v in vertices)))
-                max_bb = Vector((max(v.x for v in vertices), 
-                                max(v.y for v in vertices), 
-                                max(v.z for v in vertices)))
-            else:
-                min_bb = Vector((0, 0, 0))
-                max_bb = Vector((0, 0, 0))
-            
-            # Write bounding box
-            f.write(struct.pack('<6f', min_bb.x, min_bb.y, min_bb.z, 
-                               max_bb.x, max_bb.y, max_bb.z))
-            
-            # Write vertex type (1 = per-vertex colors present, else 0)
-            f.write(struct.pack('<I', 1 if vertex_colors else 0))
+        trailing = base64.b64decode(mesh.get('lol_scb_trailing', ''), validate=True)
+        file_name = mesh.get('lol_scb_name', obj.name).encode('utf-8')
+        if len(file_name) > 128 or b'\0' in file_name:
+            raise ValueError('SCB object name must fit in 128 UTF-8 bytes')
+        if any(len(name.encode('utf-8')) > 64 or '\0' in name for name in face_materials):
+            raise ValueError('SCB material names must fit in 64 UTF-8 bytes')
+        if trailing:
+            source = json.loads(mesh.get('lol_scb_indices', '[]'))
+            if source != [index for face in faces for index in face]:
+                raise ValueError('SCB contains opaque trailing data; changing its face layout is not supported')
+        elif scb_flag & 1:
+            raise ValueError('SCB declares per-corner colors but has no trailing color data')
 
-            # Write vertices (Y and Z are already swapped)
-            for v in vertices:
-                f.write(struct.pack('<fff', v.x, v.y, v.z))
-
-            # Write per-vertex colors (BGRA bytes) when present
-            if vertex_colors:
-                for r, g, b, a in vertex_colors:
-                    f.write(struct.pack('<4B', b, g, r, a))
-
-            # Write central point (Y and Z are already swapped)
-            f.write(struct.pack('<fff', central.x, central.y, central.z))
-            
-            # Write faces
-            for i, face in enumerate(faces):
-                # Write face indices
-                f.write(struct.pack('<III', face[0], face[1], face[2]))
-                
-                # Write material name (64 bytes, padded)
-                mat_bytes = material_name.encode('ascii', errors='ignore')
-                mat_padded = mat_bytes[:64].ljust(64, b'\x00')
-                f.write(mat_padded)
-                
-                # Write UVs (per-face format: u1, u2, u3, v1, v2, v3)
-                face_uv = face_uvs[i]
-                f.write(struct.pack('<6f', 
-                    face_uv[0].x, face_uv[1].x, face_uv[2].x,  # u1, u2, u3
-                    face_uv[0].y, face_uv[1].y, face_uv[2].y   # v1, v2, v3
-                ))
+        rs = require_ritoshark()
+        colors = bytes(channel for r, g, b, a in vertex_colors for channel in (b, g, r, a)) if vertex_colors else None
+        version = tuple(mesh.get('lol_scb_version', (3, 2)))
+        # Legacy SCB containers cannot encode newly authored per-vertex colors.
+        if colors is not None:
+            version = (3, 2)
+        result = rs.Scb.new(
+            file_name.decode('utf-8'), packed('f', vertices),
+            [rs.ScbFace(name, tuple(face), tuple(tuple(uv) for uv in face_uv))
+             for name, face, face_uv in zip(face_materials, faces, face_uvs)],
+            central=tuple(central), colors=colors, flags=scb_flag, trailing=trailing, version=version,
+        )
+        # Build all bytes before opening the destination, so validation cannot truncate it.
+        from pathlib import Path
+        Path(filepath).write_bytes(result.to_bytes())

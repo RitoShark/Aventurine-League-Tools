@@ -36,3 +36,12 @@ native/*.lib
 # Release output and temp files
 Aventurine-*.zip
 skin0.txt
+
+# Unrelated local assignment projects
+/assignment-review/
+/excel-assignment/
+/library-assignment/
+/login-risk-assignment/
+
+# Local validated release packages
+/dist/

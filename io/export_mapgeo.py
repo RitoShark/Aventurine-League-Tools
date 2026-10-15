@@ -538,7 +538,7 @@ def _source_trailing_bytes(context, version):
     in-game, so preserving the original is the safe default (matches lemon3d/lol_maya).
 
     Only valid when the export version matches the source's, since the trailing layout
-    is version-dependent. Returns the raw bytes, or None to fall back to a disabled grid.
+    is version-dependent. Returns the raw bytes, or None if preservation is impossible.
     """
     import os
 
@@ -553,10 +553,10 @@ def _source_trailing_bytes(context, version):
         return None
     with open(src, 'rb') as f:
         data = f.read()
-    if data[:4] != mg.MAPGEO_MAGIC or struct.unpack_from('<I', data, 4)[0] != version:
+    if len(data) < 8 or data[:4] != mg.MAPGEO_MAGIC or struct.unpack_from('<I', data, 4)[0] != version:
         return None
     offset = int(offset)
-    if offset <= 0 or offset > len(data):
+    if offset < 8 or offset >= len(data):
         return None
     return data[offset:]
 
@@ -564,6 +564,14 @@ def _source_trailing_bytes(context, version):
 def write_mapgeo(context, collection, version, filepath, bucket_grid_mode='ORIGINAL',
                  use_half_float=False):
     from . import import_skl
+
+    if bucket_grid_mode not in {'ORIGINAL', 'DISABLED'}:
+        raise ValueError(f'Unknown bucket-grid mode: {bucket_grid_mode}')
+    trailing = _source_trailing_bytes(context, version) if bucket_grid_mode == 'ORIGINAL' else None
+    if bucket_grid_mode == 'ORIGINAL' and trailing is None:
+        raise ValueError('Cannot preserve the original map spatial data. Restore/reimport the '
+                         'source MAPGEO and export the same version, or explicitly choose '
+                         'Disabled spatial data for an experimental export.')
 
     s = import_skl.IMPORT_SCALE
     header_overrides = list(context.scene.get('mapgeo_header_texture_overrides', []) or [])
@@ -614,7 +622,6 @@ def write_mapgeo(context, collection, version, filepath, bucket_grid_mode='ORIGI
     for model, (desc_id, vb_ids, ib_id) in zip(models, model_bufs):
         _write_model(writer, model, version, vb_ids, desc_id, ib_id, separate_point_lights)
 
-    trailing = _source_trailing_bytes(context, version) if bucket_grid_mode == 'ORIGINAL' else None
     if trailing is not None:
         writer.raw(trailing)
         trailing_mode = 'original'
@@ -649,7 +656,7 @@ def save(operator, context, filepath, collection_name=None, version=None,
         count, trailing_mode = write_mapgeo(
             context, collection, export_version, filepath, bucket_grid_mode=bucket_grid_mode,
             use_half_float=use_half_float)
-    except ValueError as e:
+    except (ValueError, OSError) as e:
         operator.report({'ERROR'}, str(e))
         return {'CANCELLED'}
 
@@ -661,7 +668,7 @@ def save(operator, context, filepath, collection_name=None, version=None,
                 "renders): no matching source file to copy the original grids from, so "
                 "the map may not render or cull correctly in-game.")
     operator.report(
-        {'INFO'},
+        {'INFO'} if trailing_mode == 'original' else {'WARNING'},
         f"Exported {count} map meshes to mapgeo v{export_version} from collection "
         f"'{collection.name}'. {tail}")
     return {'FINISHED'}

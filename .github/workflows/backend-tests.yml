@@ -1,0 +1,38 @@
+name: Backend tests
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/**']
+
+permissions:
+  contents: read
+
+jobs:
+  blender:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install bpy==4.2.0
+      - name: Test release and updater behavior
+        shell: pwsh
+        run: |
+          python tests/test_release.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tests/test_updater.py -v
+      - name: Build, test and package the configured Rust source
+        run: python scripts/build.py --output-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Aventurine-test-windows-x64
+          path: dist/Aventurine-*.zip
+          retention-days: 7
+          if-no-files-found: error

@@ -1,0 +1,760 @@
+diff --git a/crates/rs_mesh/src/static_mesh.rs b/crates/rs_mesh/src/static_mesh.rs
+index 5ab2ae5..82f2cd9 100644
+--- a/crates/rs_mesh/src/static_mesh.rs
++++ b/crates/rs_mesh/src/static_mesh.rs
+@@ -48,6 +48,79 @@ pub struct StaticMesh {
+ }
+ 
+ impl StaticMesh {
++    /// Validate authored SCB data before serialization, without rewriting source bounds.
++    pub fn validate_scb(&self) -> crate::error::Result<()> {
++        use crate::error::Error;
++        let version = if self.version == (0, 0) {
++            (3, 2)
++        } else {
++            self.version
++        };
++        if !matches!(version, (2, 1) | (2, 2) | (3, 1) | (3, 2)) {
++            return Err(Error::UnsupportedVersion(
++                (u32::from(version.0) << 16) | u32::from(version.1),
++            ));
++        }
++        if self.name.len() > 128 || self.name.contains('\0') {
++            return Err(Error::Unsupported(
++                "SCB name exceeds 128 bytes or contains NUL",
++            ));
++        }
++        if self.positions.len() > u32::MAX as usize || self.faces.len() > u32::MAX as usize {
++            return Err(Error::Unsupported("SCB count exceeds uint32"));
++        }
++        let finite = |v: Vec3| v.x.is_finite() && v.y.is_finite() && v.z.is_finite();
++        if !finite(self.central) || self.positions.iter().any(|&p| !finite(p)) {
++            return Err(Error::Unsupported(
++                "SCB positions and central must be finite",
++            ));
++        }
++        let vtype = self.vertex_type.unwrap_or(u32::from(self.colors.is_some()));
++        if vtype > 1 {
++            return Err(Error::InvalidVertexType(vtype));
++        }
++        if (version != (3, 2) && self.colors.is_some())
++            || (version == (3, 2) && (vtype == 1) != self.colors.is_some())
++        {
++            return Err(Error::Unsupported(
++                "SCB version/vertex type does not match color data",
++            ));
++        }
++        if self
++            .colors
++            .as_ref()
++            .is_some_and(|c| c.len() != self.positions.len())
++        {
++            return Err(Error::Unsupported(
++                "SCB color count does not match vertex count",
++            ));
++        }
++        for f in &self.faces {
++            if f.indices
++                .iter()
++                .any(|&i| i as usize >= self.positions.len())
++            {
++                return Err(Error::Unsupported("SCB face index is out of range"));
++            }
++            if f.material.len() > 64 || f.material.contains('\0') {
++                return Err(Error::Unsupported(
++                    "SCB material exceeds 64 bytes or contains NUL",
++                ));
++            }
++            if f.uvs.iter().any(|v| !v.x.is_finite() || !v.y.is_finite()) {
++                return Err(Error::Unsupported("SCB UVs must be finite"));
++            }
++        }
++        let required = if self.flags & 1 != 0 {
++            self.faces.len() * 9
++        } else {
++            0
++        };
++        if self.trailing.len() < required {
++            return Err(Error::Unsupported("SCB per-corner color tail is truncated"));
++        }
++        Ok(())
++    }
+     pub fn name(&self) -> &str {
+         &self.name
+     }
+diff --git a/crates/rs_mesh/src/static_read.rs b/crates/rs_mesh/src/static_read.rs
+index 1cbe682..afc0934 100644
+--- a/crates/rs_mesh/src/static_read.rs
++++ b/crates/rs_mesh/src/static_read.rs
+@@ -36,11 +36,8 @@ impl StaticMesh {
+ 
+         let major = reader.read_u16()?;
+         let minor = reader.read_u16()?;
+-        // Accept major 2 or 3 regardless of minor, matching Jade and the ltk
+-        // reference. 2.1, 2.2, and 3.2 all occur in the wild; the only layout
+-        // branch that depends on the exact version is the 3.2 `vertex_type`
+-        // field read below. Anything outside major {2,3} is unknown — reject.
+-        if !matches!(major, 2 | 3) {
++        // Known legacy layouts have no vertex-type word; only 3.2 carries it.
++        if !matches!((major, minor), (2, 1) | (2, 2) | (3, 1) | (3, 2)) {
+             return Err(Error::UnsupportedVersion(
+                 (u32::from(major) << 16) | u32::from(minor),
+             ));
+@@ -59,14 +56,18 @@ impl StaticMesh {
+             None
+         };
+ 
+-        let mut positions = Vec::with_capacity(vertex_count);
++        if vertex_type.is_some_and(|t| t > 1) {
++            return Err(Error::InvalidVertexType(vertex_type.unwrap()));
++        }
++        // Grow with successfully read records rather than trusting unvalidated counts.
++        let mut positions = Vec::new();
+         for _ in 0..vertex_count {
+             positions.push(reader.read_vec3()?);
+         }
+ 
+         let colors = match vertex_type {
+             Some(t) if t >= 1 => {
+-                let mut c = Vec::with_capacity(vertex_count);
++                let mut c = Vec::new();
+                 for _ in 0..vertex_count {
+                     c.push(reader.read_byte_array::<4>()?);
+                 }
+@@ -77,9 +78,12 @@ impl StaticMesh {
+ 
+         let central = reader.read_vec3()?;
+ 
+-        let mut faces = Vec::with_capacity(face_count);
++        let mut faces = Vec::new();
+         for _ in 0..face_count {
+             let indices = [reader.read_u32()?, reader.read_u32()?, reader.read_u32()?];
++            if indices.iter().any(|&i| i as usize >= vertex_count) {
++                return Err(Error::Unsupported("SCB face index is out of range"));
++            }
+             let material = reader.read_fixed_string::<64>()?;
+             let u = [reader.read_f32()?, reader.read_f32()?, reader.read_f32()?];
+             let v = [reader.read_f32()?, reader.read_f32()?, reader.read_f32()?];
+diff --git a/crates/rs_mesh/src/write.rs b/crates/rs_mesh/src/write.rs
+index 9d08059..ac70e96 100644
+--- a/crates/rs_mesh/src/write.rs
++++ b/crates/rs_mesh/src/write.rs
+@@ -121,6 +121,7 @@ impl StaticMesh {
+     /// bounds, vertex-type word, and post-face tail verbatim so a read of a real file round-trips
+     /// byte-for-byte.
+     pub fn to_scb_writer<W: Write>(&self, w: &mut W) -> Result<()> {
++        self.validate_scb()?;
+         let (major, minor) = if self.version == (0, 0) {
+             (3, 2)
+         } else {
+diff --git a/crates/rs_python/python/ritoshark/__init__.pyi b/crates/rs_python/python/ritoshark/__init__.pyi
+index 8f144e7..f2f1009 100644
+--- a/crates/rs_python/python/ritoshark/__init__.pyi
++++ b/crates/rs_python/python/ritoshark/__init__.pyi
+@@ -27,7 +27,6 @@ class Skn:
+     def from_bytes(data: bytes) -> Skn: ...
+     @staticmethod
+     def new(
+-        *,
+         positions: bytes,
+         normals: bytes,
+         uvs: bytes,
+@@ -35,9 +34,29 @@ class Skn:
+         blend_weights: bytes,
+         indices: bytes,
+         submeshes: list[Submesh],
++        *,
++        colors: bytes | None = None,
++        tangents: bytes | None = None,
++        flags: int = 0,
++        prefix_block: bytes | None = None,
++        trailing: bytes | None = None,
+     ) -> Skn:
+-        """Builds a new .skn from packed buffers. `indices` values above 65535 or
+-        `blend_indices` values above 255 raise WriteError."""
++        """Build a v4.1 mesh from absolute indices and finite packed buffers.
++        Flag 2 encodes indices relative to each submesh on disk. Encoded indices
++        above 65535 or influence slots above 255 raise WriteError. Tangents require
++        BGRA colors; prefix bytes require flag 1. Bounds are computed from positions."""
++    @property
++    def flags(self) -> int: ...
++    @property
++    def colors(self) -> bytes | None:
++        """Raw four-byte BGRA color values per vertex."""
++    @property
++    def tangents(self) -> bytes | None:
++        """Four little-endian float32 values per vertex."""
++    @property
++    def prefix_block(self) -> bytes: ...
++    @property
++    def trailing(self) -> bytes: ...
+     @property
+     def version(self) -> tuple[int, int]: ...
+     @property
+@@ -83,8 +102,19 @@ class Scb:
+     @staticmethod
+     def from_bytes(data: bytes) -> Scb: ...
+     @staticmethod
+-    def new(name: str, positions: bytes, faces: list[ScbFace]) -> Scb: ...
+-    def replace_geometry(self, positions: bytes, faces: list[ScbFace]) -> None:
++    def new(name: str, positions: bytes, faces: list[ScbFace], *,
++            central: tuple[float, float, float] | None = None, colors: bytes | None = None,
++            flags: int = 0, trailing: bytes | None = None, version: tuple[int, int] = (3, 2)) -> Scb: ...
++    @property
++    def version(self) -> tuple[int, int]: ...
++    @property
++    def flags(self) -> int: ...
++    @property
++    def colors(self) -> bytes | None:
++        """Four raw BGRA bytes per vertex, or None."""
++    @property
++    def trailing(self) -> bytes: ...
++    def replace_geometry(self, positions: bytes, faces: list[ScbFace], recompute_bounds: bool = False) -> None:
+         """Swaps in new geometry while preserving what a caller cannot reconstruct: the
+         container version, the raw flag word, the vertexType word, per-vertex colors, and the
+         opaque trailing block holding per-face VCP data and the local-origin/pivot vectors.
+@@ -159,8 +189,11 @@ class Skl:
+         influences: list[int],
+         name: str = "",
+         asset: str = "",
++        flags: int = 0,
+     ) -> Skl: ...
+     @property
++    def flags(self) -> int: ...
++    @property
+     def name(self) -> str: ...
+     @property
+     def asset(self) -> str: ...
+diff --git a/crates/rs_python/src/anim.rs b/crates/rs_python/src/anim.rs
+index 4815f97..dc897de 100644
+--- a/crates/rs_python/src/anim.rs
++++ b/crates/rs_python/src/anim.rs
+@@ -159,9 +159,16 @@ impl Skl {
+     }
+ 
+     #[staticmethod]
+-    #[pyo3(signature = (joints, influences, name = String::new(), asset = String::new()))]
+-    fn new(joints: Vec<PyJoint>, influences: Vec<u16>, name: String, asset: String) -> Self {
++    #[pyo3(signature = (joints, influences, name = String::new(), asset = String::new(), flags = 0))]
++    fn new(
++        joints: Vec<PyJoint>,
++        influences: Vec<u16>,
++        name: String,
++        asset: String,
++        flags: u16,
++    ) -> Self {
+         let mut inner = Skeleton::new();
++        inner.flags = flags;
+         inner.name = name;
+         inner.asset = asset;
+         inner.joints = joints.into_iter().map(|j| j.inner).collect();
+@@ -169,6 +176,11 @@ impl Skl {
+         Self { inner }
+     }
+ 
++    #[getter]
++    fn flags(&self) -> u16 {
++        self.inner.flags
++    }
++
+     #[getter]
+     fn name(&self) -> &str {
+         &self.inner.name
+diff --git a/crates/rs_python/src/mesh.rs b/crates/rs_python/src/mesh.rs
+index 51cef5d..ec03618 100644
+--- a/crates/rs_python/src/mesh.rs
++++ b/crates/rs_python/src/mesh.rs
+@@ -9,7 +9,7 @@ UVs travel as `ScbFace` values rather than packed buffers since each face is sma
+ 
+ use pyo3::prelude::*;
+ use pyo3::types::PyBytes;
+-use ritoshark::math::{Vec2, Vec3};
++use ritoshark::math::{Vec2, Vec3, Vec4};
+ use ritoshark::mesh::{
+     SkinnedMesh, SkinnedMeshRange, SkinnedMeshVertex, SkinnedMeshVertexType, StaticMesh,
+     StaticMeshFace,
+@@ -86,7 +86,7 @@ impl Skn {
+     }
+ 
+     #[staticmethod]
+-    #[pyo3(signature = (positions, normals, uvs, blend_indices, blend_weights, indices, submeshes))]
++    #[pyo3(signature = (positions, normals, uvs, blend_indices, blend_weights, indices, submeshes, *, colors = None, tangents = None, flags = 0, prefix_block = None, trailing = None))]
+     #[allow(clippy::too_many_arguments)]
+     fn new(
+         positions: &[u8],
+@@ -96,6 +96,11 @@ impl Skn {
+         blend_weights: &[u8],
+         indices: &[u8],
+         submeshes: Vec<Submesh>,
++        colors: Option<&[u8]>,
++        tangents: Option<&[u8]>,
++        flags: u32,
++        prefix_block: Option<&[u8]>,
++        trailing: Option<&[u8]>,
+     ) -> PyResult<Self> {
+         let positions = unpack_vec3(positions, "positions")?;
+         let normals = unpack_vec3(normals, "normals")?;
+@@ -116,11 +121,6 @@ impl Skn {
+                 indices.len()
+             )));
+         }
+-        if let Some(bad) = indices.iter().find(|&&i| i > u16::MAX as u32) {
+-            return Err(write_err(format!(
+-                "indices: {bad} exceeds the .skn limit of 65535 vertices per mesh"
+-            )));
+-        }
+         if let Some(bad) = indices.iter().find(|&&i| i as usize >= n) {
+             return Err(write_err(format!(
+                 "indices: {bad} is out of range for {n} vertices"
+@@ -137,9 +137,79 @@ impl Skn {
+             )));
+         }
+ 
++        if positions.iter().any(|v| !v.is_finite())
++            || normals.iter().any(|v| !v.is_finite())
++            || uvs.iter().any(|v| !v.is_finite())
++            || blend_weights.iter().any(|v| !v.is_finite() || *v < 0.0)
++        {
++            return Err(write_err("geometry must be finite and weights nonnegative"));
++        }
++        if let Some(colors) = colors {
++            expect_count(colors.len(), n * 4, "colors")?;
++        }
++        let tangents = tangents.map(|b| unpack_f32(b, "tangents")).transpose()?;
++        if let Some(t) = &tangents {
++            expect_count(t.len(), n * 4, "tangents")?;
++            if colors.is_none() || t.iter().any(|v| !v.is_finite()) {
++                return Err(write_err(
++                    "tangents require colors and finite float32 values",
++                ));
++            }
++        }
++        let prefix_block = prefix_block.unwrap_or_default();
++        if prefix_block.len() > u16::MAX as usize
++            || (!prefix_block.is_empty() && flags & SkinnedMesh::FLAG_PREFIX_BLOCK == 0)
++        {
++            return Err(write_err(
++                "prefix_block requires flag 1 and at most 65535 bytes",
++            ));
++        }
++        let mut disk_indices = indices.clone();
++        let mut covered = vec![false; indices.len()];
++        for range in &submeshes {
++            let vs = range.vertex_start as usize;
++            let ve = vs
++                .checked_add(range.vertex_count as usize)
++                .ok_or_else(|| write_err("vertex range overflow"))?;
++            let start = range.index_start as usize;
++            let end = start
++                .checked_add(range.index_count as usize)
++                .ok_or_else(|| write_err("index range overflow"))?;
++            if ve > n
++                || end > indices.len()
++                || start % 3 != 0
++                || range.index_count % 3 != 0
++                || range.name.len() > 64
++                || range.name.contains('\0')
++            {
++                return Err(write_err(
++                    "invalid submesh range or name (maximum 64 UTF-8 bytes)",
++                ));
++            }
++            for i in start..end {
++                if covered[i] || indices[i] < range.vertex_start || indices[i] as usize >= ve {
++                    return Err(write_err(
++                        "submesh indices overlap or refer outside its vertex range",
++                    ));
++                }
++                covered[i] = true;
++                if flags & SkinnedMesh::FLAG_RELATIVE_INDICES != 0 {
++                    disk_indices[i] -= range.vertex_start;
++                }
++            }
++        }
++        if flags & SkinnedMesh::FLAG_RELATIVE_INDICES != 0 && covered.iter().any(|v| !v) {
++            return Err(write_err(
++                "relative indices require submeshes covering every index",
++            ));
++        }
++        if disk_indices.iter().any(|&i| i > u16::MAX as u32) {
++            return Err(write_err("indices exceed the 65535 index limit"));
++        }
++
+         let vertices = (0..n)
+             .map(|i| {
+-                SkinnedMeshVertex::new(
++                let mut vertex = SkinnedMeshVertex::new(
+                     positions[i],
+                     [
+                         blend_indices[i * 4] as u8,
+@@ -155,7 +225,12 @@ impl Skn {
+                     ],
+                     normals[i],
+                     uvs[i],
+-                )
++                );
++                vertex.color = colors.map(|c| [c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]]);
++                vertex.tangent = tangents
++                    .as_ref()
++                    .map(|t| Vec4::new(t[i * 4], t[i * 4 + 1], t[i * 4 + 2], t[i * 4 + 3]));
++                vertex
+             })
+             .collect::<Vec<_>>();
+ 
+@@ -175,19 +250,70 @@ impl Skn {
+         let inner = SkinnedMesh {
+             major: 4,
+             minor: 1,
+-            flags: 0,
+-            vertex_type: SkinnedMeshVertexType::Basic,
++            flags,
++            vertex_type: if tangents.is_some() {
++                SkinnedMeshVertexType::Tangent
++            } else if colors.is_some() {
++                SkinnedMeshVertexType::Color
++            } else {
++                SkinnedMeshVertexType::Basic
++            },
+             bounding_box: bounds_of(&positions),
+             bounding_sphere: sphere_of(&positions),
+             ranges,
+-            indices: indices.iter().map(|&i| i as u16).collect(),
++            indices: disk_indices.iter().map(|&i| i as u16).collect(),
+             vertices,
+-            prefix_block: Vec::new(),
+-            trailing: vec![0u8; 12],
++            prefix_block: prefix_block.to_vec(),
++            trailing: trailing.map_or_else(|| vec![0u8; 12], |b| b.to_vec()),
+         };
+         Ok(Self { inner })
+     }
+ 
++    #[getter]
++    fn flags(&self) -> u32 {
++        self.inner.flags
++    }
++
++    #[getter]
++    fn colors<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
++        if self.inner.vertex_type == SkinnedMeshVertexType::Basic {
++            return None;
++        }
++        let values: Vec<u8> = self
++            .inner
++            .vertices
++            .iter()
++            .flat_map(|v| v.color.unwrap_or([0; 4]))
++            .collect();
++        Some(PyBytes::new(py, &values))
++    }
++
++    #[getter]
++    fn tangents<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
++        if self.inner.vertex_type != SkinnedMeshVertexType::Tangent {
++            return None;
++        }
++        Some(PyBytes::new(
++            py,
++            &pack_f32(
++                self.inner
++                    .vertices
++                    .iter()
++                    .flat_map(|v| v.tangent.unwrap_or(Vec4::ZERO).to_array()),
++            ),
++        ))
++    }
++
++    #[getter]
++    fn prefix_block<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
++        PyBytes::new(py, &self.inner.prefix_block)
++    }
++
++    #[getter]
++    fn trailing<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
++        PyBytes::new(py, &self.inner.trailing)
++    }
++
+     #[getter]
+     fn version(&self) -> (u16, u16) {
+         self.inner.version()
+@@ -356,39 +482,75 @@ impl Scb {
+     }
+ 
+     #[staticmethod]
+-    #[pyo3(signature = (name, positions, faces))]
+-    fn new(name: String, positions: &[u8], faces: Vec<ScbFace>) -> PyResult<Self> {
++    #[pyo3(signature = (name, positions, faces, *, central=None, colors=None, flags=0, trailing=None, version=(3, 2)))]
++    fn new(
++        name: String,
++        positions: &[u8],
++        faces: Vec<ScbFace>,
++        central: Option<(f32, f32, f32)>,
++        colors: Option<&[u8]>,
++        flags: u32,
++        trailing: Option<&[u8]>,
++        version: (u16, u16),
++    ) -> PyResult<Self> {
+         let positions = unpack_vec3(positions, "positions")?;
+-        let n = positions.len();
+-        for f in &faces {
+-            for i in [f.indices.0, f.indices.1, f.indices.2] {
+-                if i as usize >= n {
+-                    return Err(write_err(format!(
+-                        "faces: index {i} is out of range for {n} vertices"
+-                    )));
++        let central = central
++            .map(|c| Vec3::new(c.0, c.1, c.2))
++            .unwrap_or_else(|| bounds_of(&positions).center());
++        let colors = colors
++            .map(|data| {
++                if data.len() != positions.len() * 4 {
++                    return Err(write_err(
++                        "SCB colors must contain four BGRA bytes per vertex",
++                    ));
+                 }
+-            }
+-        }
+-        let central = if positions.is_empty() {
+-            Vec3::new(0.0, 0.0, 0.0)
+-        } else {
+-            let bb = bounds_of(&positions);
+-            (bb.min + bb.max) * 0.5
+-        };
+-        Ok(Self {
+-            inner: StaticMesh {
+-                name,
+-                version: (3, 2),
+-                flags: 0,
+-                bounding_box: bounds_of(&positions),
+-                vertex_type: None,
+-                central,
+-                positions,
+-                colors: None,
+-                faces: faces.iter().map(face_from_py).collect(),
+-                trailing: Vec::new(),
++                Ok(data
++                    .chunks_exact(4)
++                    .map(|c| [c[0], c[1], c[2], c[3]])
++                    .collect())
++            })
++            .transpose()?;
++        let inner = StaticMesh {
++            name,
++            version,
++            flags,
++            bounding_box: bounds_of(&positions),
++            vertex_type: if version == (3, 2) {
++                Some(u32::from(colors.is_some()))
++            } else {
++                None
+             },
+-        })
++            central,
++            positions,
++            colors,
++            faces: faces.iter().map(face_from_py).collect(),
++            trailing: trailing.unwrap_or_default().to_vec(),
++        };
++        inner.validate_scb().map_err(write_err)?;
++        Ok(Self { inner })
++    }
++
++    #[getter]
++    fn version(&self) -> (u16, u16) {
++        self.inner.version
++    }
++
++    #[getter]
++    fn flags(&self) -> u32 {
++        self.inner.flags
++    }
++
++    #[getter]
++    fn colors<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
++        self.inner
++            .colors
++            .as_ref()
++            .map(|colors| PyBytes::new(py, &colors.iter().flatten().copied().collect::<Vec<_>>()))
++    }
++
++    #[getter]
++    fn trailing<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
++        PyBytes::new(py, &self.inner.trailing)
+     }
+ 
+     /** Replaces the geometry while keeping everything the caller cannot reconstruct: the
+@@ -427,17 +589,32 @@ impl Scb {
+                 )));
+             }
+         }
++        let mut replacement = self.inner.clone();
++        replacement.positions = positions;
++        replacement.faces = faces.iter().map(face_from_py).collect();
++        if !self.inner.trailing.is_empty()
++            && self
++                .inner
++                .faces
++                .iter()
++                .map(|f| f.indices)
++                .collect::<Vec<_>>()
++                != replacement
++                    .faces
++                    .iter()
++                    .map(|f| f.indices)
++                    .collect::<Vec<_>>()
++        {
++            return Err(write_err(
++                "SCB opaque trailing data requires unchanged face layout",
++            ));
++        }
+         if recompute_bounds {
+-            let bb = bounds_of(&positions);
+-            self.inner.central = if positions.is_empty() {
+-                Vec3::new(0.0, 0.0, 0.0)
+-            } else {
+-                (bb.min + bb.max) * 0.5
+-            };
+-            self.inner.bounding_box = bb;
++            replacement.bounding_box = bounds_of(&replacement.positions);
++            replacement.central = replacement.bounding_box.center();
+         }
+-        self.inner.positions = positions;
+-        self.inner.faces = faces.iter().map(face_from_py).collect();
++        replacement.validate_scb().map_err(write_err)?;
++        self.inner = replacement;
+         Ok(())
+     }
+ 
+diff --git a/crates/rs_python/tests/test_mesh_metadata.py b/crates/rs_python/tests/test_mesh_metadata.py
+new file mode 100644
+index 0000000..824da07
+--- /dev/null
++++ b/crates/rs_python/tests/test_mesh_metadata.py
+@@ -0,0 +1,64 @@
++"""Synthetic format tests: no private Sample-Files directory required."""
++import math
++import struct
++import pytest
++import ritoshark as rs
++
++
++def skin(**overrides):
++    values = dict(
++        positions=struct.pack('<9f', 10, 20, 30, 110, 20, 30, 10, 120, 30),
++        normals=struct.pack('<9f', *([0, 0, 1] * 3)),
++        uvs=struct.pack('<6f', 0, 0, 1, 0, 0, 1),
++        blend_indices=struct.pack('<12I', *([0] * 12)),
++        blend_weights=struct.pack('<12f', *([1, 0, 0, 0] * 3)),
++        indices=struct.pack('<3I', 0, 1, 2), submeshes=[rs.Submesh('body', 0, 3, 0, 3)])
++    values.update(overrides)
++    return rs.Skn.new(**values)
++
++
++def test_optional_vertex_fields_and_opaque_metadata():
++    colors = bytes([7, 80, 190, 255] * 3)
++    tangents = struct.pack('<12f', *([1, 0, 0, -1] * 3))
++    source = skin(colors=colors, tangents=tangents, flags=3, prefix_block=b'prefix', trailing=b'tail')
++    result = rs.Skn.from_bytes(source.to_bytes())
++    assert result.colors == colors
++    assert result.tangents == tangents
++    assert result.flags == 3
++    assert result.prefix_block == b'prefix'
++    assert result.trailing == b'tail'
++    assert result.indices == source.indices
++
++
++@pytest.mark.parametrize('colors,tangents,stride,kind', [
++    (None, None, 52, 0), (bytes(12), None, 56, 1),
++    (bytes(12), struct.pack('<12f', *([1, 0, 0, 1] * 3)), 72, 2)])
++def test_vertex_layout_and_nonzero_bounds(colors, tangents, stride, kind):
++    data = skin(colors=colors, tangents=tangents).to_bytes()
++    assert struct.unpack_from('<2I', data, 104) == (stride, kind)
++    assert struct.unpack_from('<6f', data, 112) == (10, 20, 30, 110, 120, 30)
++    center = struct.unpack_from('<3f', data, 136)
++    radius, = struct.unpack_from('<f', data, 148)
++    for point in [(10, 20, 30), (110, 20, 30), (10, 120, 30)]:
++        assert math.dist(point, center) <= radius + 1e-4
++
++
++@pytest.mark.parametrize('override', [
++    {'colors': b'bad'}, {'tangents': bytes(48)}, {'prefix_block': b'undeclared'},
++    {'submeshes': [rs.Submesh('x' * 65, 0, 3, 0, 3)]},
++    {'submeshes': [rs.Submesh('body', 0, 4, 0, 3)]},
++    {'submeshes': [rs.Submesh('body', 1, 2, 0, 3)]},
++    {'blend_weights': struct.pack('<12f', *([-1, 0, 0, 0] * 3))},
++    {'positions': struct.pack('<9f', *([float('nan'), 0, 0] * 3))},
++])
++def test_invalid_mesh_inputs(override):
++    with pytest.raises(rs.WriteError):
++        skin(**override)
++
++
++def test_skeleton_flags():
++    joint = rs.Joint('root', 0, -1, 3.5, (0, 0, 0), (1, 1, 1), (0, 0, 0, 1),
++                     (0, 0, 0), (1, 1, 1), (0, 0, 0, 1), flags=7)
++    result = rs.Skl.from_bytes(rs.Skl.new([joint], [0], 'name', 'asset', flags=9).to_bytes())
++    assert (result.flags, result.name, result.asset) == (9, 'name', 'asset')
++    assert (result.joints[0].flags, result.joints[0].radius) == (7, 3.5)
+diff --git a/crates/rs_python/tests/test_scb_metadata.py b/crates/rs_python/tests/test_scb_metadata.py
+new file mode 100644
+index 0000000..abf58f2
+--- /dev/null
++++ b/crates/rs_python/tests/test_scb_metadata.py
+@@ -0,0 +1,57 @@
++import struct
++import pytest
++import ritoshark as rs
++
++
++POSITIONS = struct.pack('<9f', 10, 20, 30, 40, 20, 30, 10, 50, 30)
++
++
++def mesh(**kwargs):
++    return rs.Scb.new('authored', POSITIONS, [rs.ScbFace('body.part', (0, 1, 2), ((0, 0), (1, 0), (0, 1)))], **kwargs)
++
++
++def test_scb_metadata_colors_tail_and_bounds():
++    tail = bytes(range(9)) + struct.pack('<6f', 1, 2, 3, 4, 5, 6)
++    colors = bytes([7, 63, 129, 210] * 3)
++    source = mesh(central=(12, 23, 34), colors=colors, flags=5, trailing=tail)
++    data = source.to_bytes()
++    result = rs.Scb.from_bytes(data)
++    assert result.central == (12, 23, 34)
++    assert result.flags == 5 and result.colors == colors and result.trailing == tail
++    assert result.version == (3, 2) and result.to_bytes() == data
++    assert struct.unpack_from('<6f', data, 152) == (10, 20, 30, 40, 50, 30)
++
++
++@pytest.mark.parametrize('version', [(2, 1), (2, 2), (3, 1), (3, 2)])
++def test_legacy_scb_versions(version):
++    source = mesh(version=version)
++    assert rs.Scb.from_bytes(source.to_bytes()).version == version
++
++
++@pytest.mark.parametrize('kwargs', [
++    {'colors': b'bad'}, {'central': (float('nan'), 0, 0)},
++    {'colors': bytes(12), 'version': (2, 2)}, {'flags': 1, 'trailing': b'short'},
++    {'version': (7, 2)},
++])
++def test_invalid_scb_metadata_rejected(kwargs):
++    with pytest.raises(rs.WriteError):
++        mesh(**kwargs)
++
++
++def test_replace_geometry_failure_is_atomic():
++    source = mesh(flags=1, trailing=bytes(9))
++    before = source.to_bytes()
++    with pytest.raises(rs.WriteError, match='face layout'):
++        source.replace_geometry(POSITIONS, [rs.ScbFace('x', (2, 1, 0), ((0, 0), (0, 0), (0, 0)))])
++    assert source.to_bytes() == before
++
++
++def test_reader_rejects_bad_indices_types_and_truncation():
++    good = mesh().to_bytes()
++    for offset, value in [(176, 9), (228, 900)]:
++        bad = bytearray(good)
++        struct.pack_into('<I', bad, offset, value)
++        with pytest.raises(rs.FormatError):
++            rs.Scb.from_bytes(bytes(bad))
++    with pytest.raises(rs.FormatError):
++        rs.Scb.from_bytes(good[:200])

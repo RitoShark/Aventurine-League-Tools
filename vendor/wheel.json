@@ -1,0 +1,7 @@
+{
+  "wheel": "ritoshark-0.1.0-cp39-abi3-win_amd64.whl",
+  "sha256": "7c8708e1a2d075aa795f8e69d2b0da945d9c2ccfbfe3e498104981ee964a0cf2",
+  "source_commit": "c78cf7077638ab8e5546810a09b6f0037c1f0d1d",
+  "source_patch": "ritoshark-source.patch",
+  "source_patch_sha256": "e1575c641da77064675b4516392866afd90106cb748d96a0376f0c835cf3cda8"
+}

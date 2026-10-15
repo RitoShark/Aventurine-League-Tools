@@ -1,7 +1,7 @@
 """SKL skeleton importer - Visual skeleton layout without leaf bones"""
 import bpy
 import mathutils
-from ..utils.binary_utils import BinaryStream
+from ..utils.backend import require_ritoshark
 
 # Scale factor to match Maya/LtMAO units (0.01 = 100x smaller)
 IMPORT_SCALE = 0.01
@@ -10,7 +10,7 @@ EXPORT_SCALE = 1.0 / IMPORT_SCALE  # = 100, to scale back up for export
 
 class SKLJoint:
     __slots__ = ('name', 'parent', 'local_translation', 'local_scale', 'local_rotation', 'global_pos',
-                 'raw_trans', 'raw_rot', 'raw_scale')
+                 'raw_trans', 'raw_rot', 'raw_scale', 'flags', 'radius')
     
     def __init__(self):
         self.name = None
@@ -23,99 +23,53 @@ class SKLJoint:
         self.raw_trans = None
         self.raw_rot = None
         self.raw_scale = None
+        self.flags = 0
+        self.radius = 2.1
+
+
+class SKLJoints(list):
+    pass
 
 
 def read_skl(filepath):
-    joints = []
-    influences = []
-    
-    with open(filepath, 'rb') as f:
-        bs = BinaryStream(f)
-        
-        bs.pad(4) # Resource size
-        magic = bs.read_uint32()
-        
-        if magic == 0x22FD4FC3:
-            version = bs.read_uint32()
-            if version != 0:
-                raise Exception(f'Unsupported SKL version: {version}')
-            
-            bs.pad(2) # flags
-            joint_count = bs.read_uint16()
-            influence_count = bs.read_uint32()
-            joints_offset = bs.read_int32()
-            bs.pad(4) # joint indices offset
-            influences_offset = bs.read_int32()
-            bs.pad(32) # Other offsets and reserved
-            
-            # Read joints
-            if joints_offset > 0:
-                bs.seek(joints_offset)
-                joints = [SKLJoint() for _ in range(joint_count)]
-                
-                for i in range(joint_count):
-                    joint = joints[i]
-                    
-                    # 16 bytes header per joint
-                    bs.pad(4) # flags and id
-                    joint.parent = bs.read_int16()
-                    bs.pad(10) # flags(2) + hash(4) + radius(4)
-                    
-                    # Local transform
-                    trans = bs.read_vec3()
-                    scale = bs.read_vec3()
-                    rot_raw = bs.read_quat()
-                    rot = mathutils.Quaternion((rot_raw.w, rot_raw.x, rot_raw.y, rot_raw.z))
-                    
-                    joint.raw_trans = trans
-                    joint.raw_rot = rot
-                    joint.raw_scale = scale
-                    
-                    # League to Blender (Y-up to Z-up)
-                    # Mapping: X' = -x (Mirror), Y' = -z, Z' = y
-                    P = mathutils.Matrix(((-1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
-                    P_inv = P.inverted()
-                    
-                    # League Local Matrix (Order: T * R * S)
-                    l_t = mathutils.Matrix.Translation(trans)
-                    # rot is (x,y,z,w) from read_quat
-                    l_r = mathutils.Quaternion((rot.w, rot.x, rot.y, rot.z)).to_matrix().to_4x4()
-                    l_s = mathutils.Matrix.Diagonal((scale.x, scale.y, scale.z, 1.0))
-                    l_mat = l_t @ l_r @ l_s
-                    
-                    # Blender Local Matrix
-                    b_mat = P @ l_mat @ P_inv
-                    b_t, b_r, b_s = b_mat.decompose()
-                    
-                    joint.local_translation = b_t * IMPORT_SCALE
-                    joint.local_rotation = b_r
-                    joint.local_scale = b_s
-                    
-                    # Inversed global transform (40 bytes)
-                    bs.pad(40)
-                    
-                    joint_name_offset = bs.read_int32()
-                    return_offset = bs.tell()
-                    bs.seek(return_offset - 4 + joint_name_offset)
-                    joint.name = bs.read_char_until_zero().rstrip('\0')
-                    
-                    if i == 0 and joint.name == '':
-                        bs.pad(1)
-                        joint.name = bs.read_char_until_zero()
-                    
-                    bs.seek(return_offset)
-            
-            # Read influences mapping
-            if influences_offset > 0 and influence_count > 0:
-                bs.seek(influences_offset)
-                influences = bs.read_uint16(influence_count)
-                if not isinstance(influences, (list, tuple)):
-                    influences = [influences]
-
-        else:
-            raise Exception('Legacy SKL or wrong signature')
-    
-    return joints, influences
+    skeleton = require_ritoshark().Skl.from_path(str(filepath))
+    source = skeleton.joints
+    index_by_id = {joint.id: index for index, joint in enumerate(source)}
+    if len(index_by_id) != len(source) or len({joint.name for joint in source}) != len(source):
+        raise ValueError('SKL contains duplicate joint IDs or names')
+    # Validate ancestry before the recursive global-transform calculation.
+    completed = set()
+    for item in source:
+        current = item.id
+        chain = set()
+        while current != -1 and current not in completed:
+            if current in chain or current not in index_by_id:
+                raise ValueError('SKL contains a cyclic or missing parent')
+            chain.add(current)
+            current = source[index_by_id[current]].parent_id
+        completed.update(chain)
+    joints = SKLJoints()
+    joints.name, joints.asset, joints.flags = skeleton.name, skeleton.asset, skeleton.flags
+    P = mathutils.Matrix(((-1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
+    P_inv = P.inverted()
+    for item in source:
+        joint = SKLJoint()
+        joint.name = item.name
+        joint.flags, joint.radius = item.flags, item.radius
+        joint.parent = -1 if item.parent_id == -1 else index_by_id[item.parent_id]
+        joint.raw_trans = mathutils.Vector(item.local_translation)
+        joint.raw_scale = mathutils.Vector(item.local_scale)
+        x, y, z, w = item.local_rotation
+        joint.raw_rot = mathutils.Quaternion((w, x, y, z))
+        local = (mathutils.Matrix.Translation(joint.raw_trans)
+                 @ joint.raw_rot.to_matrix().to_4x4()
+                 @ mathutils.Matrix.Diagonal((*joint.raw_scale, 1.0)))
+        translation, rotation, scale = (P @ local @ P_inv).decompose()
+        joint.local_translation = translation * IMPORT_SCALE
+        joint.local_rotation = rotation
+        joint.local_scale = scale
+        joints.append(joint)
+    return joints, [index_by_id[joint_id] for joint_id in skeleton.influences]
 
 
 def create_armature(joints, name="Armature", bone_orient='VISUAL'):
@@ -156,6 +110,9 @@ def create_armature(joints, name="Armature", bone_orient='VISUAL'):
     
     armature_data = bpy.data.armatures.new(name)
     armature_obj = bpy.data.objects.new(name, armature_data)
+    armature_obj['lol_skl_name'] = getattr(joints, 'name', '')
+    armature_obj['lol_skl_asset'] = getattr(joints, 'asset', '')
+    armature_obj['lol_skl_flags'] = getattr(joints, 'flags', 0)
     bpy.context.scene.collection.objects.link(armature_obj)
     bpy.context.view_layer.objects.active = armature_obj
     
@@ -292,6 +249,8 @@ def _store_native_props(joints, mats, armature_obj):
         pbone["native_bind_s"] = [joint.raw_scale.x, joint.raw_scale.y, joint.raw_scale.z]
         # Store original bone index for stable export ordering
         pbone["native_bone_index"] = i
+        pbone["lol_joint_flags"] = joint.flags
+        pbone["lol_joint_radius"] = joint.radius
         # Store original parent name so animation correction can find the right
         # C_parent even if the user reparents bones in Blender
         if joint.parent >= 0:

@@ -535,7 +535,7 @@ def build_scene(operator, context, mg, collection_name=None, name_by_material=Fa
 
 
 # ---------------------------------------------------------------------------
-# Textures (M2): materials.bin via native bin_parser.dll + .tex via tex_converter
+# Textures
 # ---------------------------------------------------------------------------
 
 def _fnv1a(s):
@@ -608,28 +608,19 @@ def _load_image(disk_path, cache):
     if disk_path in cache:
         return cache[disk_path]
     img = None
-    tmp = None
     try:
         load_path = disk_path
-        if disk_path.lower().endswith('.tex'):
-            import tempfile
-            from ..utils import texture_manager
-            dds_bytes = texture_manager.tex_to_dds_bytes(disk_path)
-            fd, tmp = tempfile.mkstemp(suffix='.dds')
-            os.close(fd)
-            with open(tmp, 'wb') as f:
-                f.write(dds_bytes)
-            load_path = tmp
-        img = bpy.data.images.load(load_path, check_existing=False)
+        if disk_path.lower().endswith(('.tex', '.dds')):
+            from ..utils.texture_manager import load_tex_image
+            img = load_tex_image(disk_path)
+        else:
+            img = bpy.data.images.load(load_path, check_existing=False)
         img.pack()  # embed before the temp file disappears
         img.name = os.path.basename(disk_path)
         img['lol_source_path'] = disk_path
     except Exception as e:
         print(f'Aventurine: failed to load map texture {disk_path}: {e}')
         img = None
-    finally:
-        if tmp and os.path.exists(tmp):
-            os.remove(tmp)
     cache[disk_path] = img
     return img
 
@@ -712,11 +703,12 @@ def apply_textures(operator, context, mg, build_result, filepath):
     from ..utils import texture_manager
 
     bin_path = _find_materials_bin(filepath)
-    doc = texture_manager.parse_materials_bin(bin_path) if bin_path else None
-    if bin_path and doc is None:
-        operator.report({'WARNING'},
-                        'bin_parser.dll missing or outdated — material defaults skipped '
-                        '(rebuild native/bin_parser.dll)')
+    doc = None
+    if bin_path:
+        try:
+            doc = texture_manager.parse_materials_bin(bin_path)
+        except Exception as error:
+            operator.report({'WARNING'}, f'Could not read map materials: {error}')
 
     by_key = {entry['key']: entry for entry in doc.get('materials', [])} if doc else {}
     cache = {}

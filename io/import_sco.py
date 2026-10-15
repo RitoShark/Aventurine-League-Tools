@@ -21,7 +21,7 @@ def read_sco(filepath):
         'vertices': [],
         'indices': [],
         'uvs': [],
-        'material': 'lambert1'
+        'material': 'lambert1', 'materials': []
     }
     
     i = 1
@@ -55,14 +55,17 @@ def read_sco(filepath):
                 i += 1
                 fp = lines[i].replace('\t', ' ').split()
                 # Format: 3 v1 v2 v3 mat u1 v1 u2 v2 u3 v3
-                if len(fp) < 11: continue
+                if len(fp) < 11: raise ValueError('Truncated SCO face')
                 
                 idx = [int(fp[1]), int(fp[2]), int(fp[3])]
                 # Skip degenerate
                 if idx[0] == idx[1] or idx[1] == idx[2] or idx[0] == idx[2]:
                     continue
                     
+                if len(fp) != 11 or int(fp[0]) != 3 or any(v < 0 or v >= len(data['vertices']) for v in idx):
+                    raise ValueError('Invalid SCO face')
                 data['indices'].extend(idx)
+                data['materials'].append(fp[4])
                 
                 if f_idx == 0:
                     data['material'] = fp[4]
@@ -108,49 +111,24 @@ def create_mesh_and_obj(context, data):
             u, v = uvs[loop_idx]
             uv_layer.data[loop].uv = (u, 1.0 - v)
             
-    # Material
-    mat = bpy.data.materials.new(name=data['material'])
-    mat.use_nodes = True
-    mesh.materials.append(mat)
-    
+    names = data.get('materials') or [data['material']] * len(mesh.polygons)
+    slots = {}
+    for polygon, name in zip(mesh.polygons, names):
+        if name not in slots:
+            slots[name] = len(mesh.materials)
+            mat = bpy.data.materials.new(name)
+            mat.use_nodes = True
+            mat['lol_material_name'] = name
+            mesh.materials.append(mat)
+        polygon.material_index = slots[name]
+
     obj = bpy.data.objects.new(data['name'], mesh)
     context.collection.objects.link(obj)
     
-    # Pivot Bone logic (Optional, but useful for static objs with pivots)
-    if data['pivot']:
-        arm_name = data['name'] + "_Armature"
-        arm_data = bpy.data.armatures.new(arm_name)
-        arm_obj = bpy.data.objects.new(arm_name, arm_data)
-        context.collection.objects.link(arm_obj)
-        
-        context.view_layer.objects.active = arm_obj
-        bpy.ops.object.mode_set(mode='EDIT')
-        
-        bone = arm_data.edit_bones.new("Pivot")
-        # Calc pivot relative to mesh origin?
-        # In SCO, vertices are untransformed, but usually meant to be relative to CentralPoint?
-        # Typically vertices in SCO are absolute world layout.
-        # But 'PivotPoint' defines where the object rotates around.
-        # Let's place the bone at the mesh 'Center' relative to Vertices.
-        # Wait, usually vertices are centered around (0,0,0) locally, or world?
-        # Let's assume World for now as SCB/SCO are map objects.
-        
-        # Actually in loloblender: 
-        # bone_world_pos = sco_data['central'] - sco_data['pivot']
-        # This implies Pivot is an offset?
-        
-        # Let's stick to just importing the Mesh for now to be safe, unless user requests pivots.
-        # We can set the Object Origin to the Pivot Point?
-        bpy.ops.object.mode_set(mode='OBJECT')
-        
-        # Set origin to Pivot
-        # 1. Move Cursor to Pivot
-        # 2. Origin to Cursor
-        # data['pivot'] is already transformed to Blender space above
-        
-        # Actually let's keep it simple: Just Mesh.
-        pass
-        
+    obj['lol_sco_central'] = list(data['central'])
+    if data['pivot'] is not None:
+        obj['lol_sco_pivot'] = list(data['pivot'])
+
     return obj
 
 def load(operator, context, filepath):

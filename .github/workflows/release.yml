@@ -2,70 +2,129 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the current main version (recover a failed release without another version bump)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      publish: ${{ steps.plan.outputs.publish }}
+      version: ${{ steps.plan.outputs.version }}
+      library_commit: ${{ steps.plan.outputs.library_commit }}
+      rust_toolchain: ${{ steps.plan.outputs.rust_toolchain }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check version increase and pinned Rust source
+        id: plan
+        run: python scripts/release.py plan
+      - name: Test release planning and packaging
+        run: |
+          python tests/test_release.py -v
+          python tests/test_updater.py -v
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      RUSTUP_TOOLCHAIN: ${{ needs.prepare.outputs.rust_toolchain }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: addon
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: RitoShark/RitoShark-Crates
+          ref: ${{ needs.prepare.outputs.library_commit }}
+          path: library
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Apply verified local library fixes
+        run: python addon/scripts/release.py patch --library library
+      - name: Install Rust
+        run: rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+      - name: Cache Rust dependencies and build outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            library/target
+          key: windows-rust-python311-${{ hashFiles('library/Cargo.lock', 'addon/rust-build.json', 'addon/vendor/ritoshark-source.patch') }}
+          restore-keys: windows-rust-python311-
+      - name: Install build and test tools
+        run: python -m pip install maturin==1.15.0 "pytest>=8,<10" bpy==4.2.0
+      - name: Build Windows x64 Rust extension
+        run: maturin build --release --locked --manifest-path library/crates/rs_python/Cargo.toml --interpreter python --out wheels
+      - name: Vendor and install the freshly built wheel
+        shell: pwsh
+        run: |
+          python addon/scripts/release.py vendor --wheels wheels
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wheel = Get-ChildItem -LiteralPath wheels -Filter '*win_amd64.whl'
+          python -m pip install --force-reinstall $wheel.FullName
+      - name: Test Rust mesh parsing and writing
+        run: cargo test --release --locked --manifest-path library/Cargo.toml -p rs_mesh
+      - name: Test Rust Python bindings
+        run: python -m pytest library/crates/rs_python/tests -q -p no:cacheprovider
+      - name: Test Blender imports and exports
+        run: python addon/tests/test_format_sweep.py -v
+      - name: Build installable ZIP
+        run: python addon/scripts/package_addon.py --output-dir dist
+      - name: Verify ZIP registration and native module
+        run: python addon/scripts/package_addon.py --smoke-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Aventurine-${{ needs.prepare.outputs.version }}-windows-x64
+          path: dist/Aventurine-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Get current version
-        id: current
-        run: |
-          VERSION=$(python3 -c "
-          import re
-          with open('__init__.py') as f:
-              content = f.read()
-          m = re.search(r'\"version\":\s*\((\d+),\s*(\d+),\s*(\d+)\)', content)
-          print(f'{m.group(1)}.{m.group(2)}.{m.group(3)}')
-          ")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Get commit message
-        id: commit
-        run: |
-          echo "message<<EOF" >> $GITHUB_OUTPUT
-          git log -1 --pretty=%B >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Build zip
-        run: |
-          VERSION="${{ steps.current.outputs.version }}"
-          BUILD_DIR="/tmp/build/Aventurine"
-          mkdir -p "$BUILD_DIR/native"
-
-          for f in __init__.py LICENSE README.md THIRD_PARTY_LICENSES.md; do
-            [ -f "$f" ] && cp "$f" "$BUILD_DIR/"
-          done
-
-          for d in io ui utils extras tools icons; do
-            [ -d "$d" ] && cp -r "$d" "$BUILD_DIR/"
-          done
-
-          cp native/*.dll "$BUILD_DIR/native/" 2>/dev/null || true
-
-          find "$BUILD_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-
-          cd /tmp/build
-          zip -r "$GITHUB_WORKSPACE/Aventurine-${VERSION}.zip" Aventurine
-
-      - name: Delete existing release if same version
-        run: |
-          VERSION="${{ steps.current.outputs.version }}"
-          gh release delete "$VERSION" --yes 2>/dev/null || true
-          git push origin :"refs/tags/$VERSION" 2>/dev/null || true
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: Aventurine-${{ needs.prepare.outputs.version }}-windows-x64
+          path: dist
+      - name: Create release with the pushed commit message
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.current.outputs.version }}
-          name: ${{ steps.current.outputs.version }}
-          body: ${{ steps.commit.outputs.message }}
-          files: Aventurine-${{ steps.current.outputs.version }}.zip
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          git log -1 --format=%B > release-notes.txt
+          gh release create "$VERSION" "dist/Aventurine-${VERSION}.zip" \
+            --target "$GITHUB_SHA" --title "$VERSION" --notes-file release-notes.txt
