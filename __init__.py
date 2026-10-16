@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (4, 0, 0),
+    "version": (4, 0, 1),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -752,7 +752,7 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
     
     clean_names: BoolProperty(
         name="Clean Names",
-        description="Remove Blender's .001, .002 suffixes AND replace characters that are "
+        description="Preserve unique bone names and replace characters that are "
                     "illegal in Maya/League (dashes, spaces) with underscores. Needed for "
                     "skeletons imported from FBX/other games (e.g. 'bip001-pelvis'), whose "
                     "names Maya silently mangles otherwise. No-op for standard League bones",
@@ -863,19 +863,6 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
         if not arm:
             arm = next((o for o in context.scene.objects if o.type == 'ARMATURE'), None)
 
-        # Auto-fix custom bone parenting BEFORE export so the SKL is written with
-        # the correct hierarchy.  This is a no-op when there are no custom bones.
-        if arm:
-            try:
-                fixes = export_skn.fix_custom_bone_parenting(arm)
-                if fixes:
-                    names = ", ".join(b for b, _ in fixes)
-                    self.report({'INFO'}, f"Auto-fixed parenting for: {names}")
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                self.report({'WARNING'}, f"Auto-fix parenting failed: {e}")
-
         result = export_skn.save(
             self, context, self.filepath, self.export_skl, self.clean_names,
             target_armature=target_armature,
@@ -894,67 +881,13 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
         if result == {'FINISHED'} and not self.unmodified_league_armature:
             if arm:
                 try:
-                    import shutil
-                    from .io import export_anm, import_anm
-                    skn_dir = os.path.dirname(os.path.abspath(self.filepath))
-                    anim_dir = os.path.join(skn_dir, "animations")
-                    backup_dir = os.path.join(skn_dir, "Unmodified_anm_backup")
-
-                    if not os.path.isdir(anim_dir):
-                        self.report({'WARNING'}, f"No 'animations' folder found next to SKN at: {skn_dir}")
-                    else:
-                        # First run: back up originals from animations → backup.
-                        # Subsequent runs: backup already exists, so read from backup (originals untouched).
-                        if not os.path.isdir(backup_dir):
-                            os.makedirs(backup_dir, exist_ok=True)
-                            for fname in os.listdir(anim_dir):
-                                if fname.lower().endswith('.anm'):
-                                    shutil.copy2(os.path.join(anim_dir, fname),
-                                                 os.path.join(backup_dir, fname))
-                            source_dir = anim_dir
-                        else:
-                            source_dir = backup_dir
-
-                        anm_files = sorted(f for f in os.listdir(source_dir) if f.lower().endswith('.anm'))
-                        if not anm_files:
-                            self.report({'WARNING'}, f"No ANM files found in '{source_dir}'")
-                        else:
-                            if not arm.animation_data:
-                                arm.animation_data_create()
-                            original_action = arm.animation_data.action
-                            exported_count = 0
-                            failed = []
-                            try:
-                                for fname in anm_files:
-                                    src_path = os.path.join(source_dir, fname)
-                                    dst_path = os.path.join(anim_dir, fname)
-                                    temp_action = None
-                                    try:
-                                        anm_data = import_anm.read_anm(src_path)
-                                        action_name = os.path.splitext(fname)[0]
-                                        temp_action = bpy.data.actions.new(name=f"__tmp_{action_name}")
-                                        arm.animation_data.action = temp_action
-                                        import_anm.apply_anm(anm_data, arm)
-                                        export_anm.write_anm(
-                                            dst_path, arm, anm_data.fps,
-                                            disable_scaling=self.disable_scaling,
-                                            disable_transforms=self.disable_transforms,
-                                            visual_mode=True,
-                                        )
-                                        exported_count += 1
-                                    except Exception as e:
-                                        import traceback
-                                        traceback.print_exc()
-                                        failed.append(f"{fname} ({e})")
-                                    finally:
-                                        if temp_action is not None:
-                                            bpy.data.actions.remove(temp_action)
-                            finally:
-                                arm.animation_data.action = original_action
-                            if failed:
-                                self.report({'WARNING'}, f"Processed {exported_count} animation(s). Failed: {'; '.join(failed)}")
-                            else:
-                                self.report({'INFO'}, f"Processed {exported_count} animation(s) with visual mode")
+                    export_skn.process_animations_visual(
+                        self, context, self.filepath, arm,
+                        disable_scaling=self.disable_scaling,
+                        disable_transforms=self.disable_transforms,
+                        clean_names=self.clean_names,
+                        anim_scale=self.model_scale,
+                        apply_object_transform=self.apply_object_transform)
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
@@ -982,7 +915,7 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
 
     clean_names: BoolProperty(
         name="Clean Names",
-        description="Remove Blender's .001, .002 suffixes AND replace characters that are "
+        description="Preserve unique bone names and replace characters that are "
                     "illegal in Maya/League (dashes, spaces) with underscores. Needed for "
                     "skeletons imported from FBX/other games (e.g. 'bip001-pelvis'), whose "
                     "names Maya silently mangles otherwise. No-op for standard League bones",

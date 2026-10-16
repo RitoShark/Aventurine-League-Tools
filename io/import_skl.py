@@ -1,5 +1,6 @@
 """SKL skeleton importer - Visual skeleton layout without leaf bones"""
 import bpy
+import json
 import mathutils
 from ..utils.backend import require_ritoshark
 
@@ -69,7 +70,8 @@ def read_skl(filepath):
         joint.local_rotation = rotation
         joint.local_scale = scale
         joints.append(joint)
-    return joints, [index_by_id[joint_id] for joint_id in skeleton.influences]
+    joints.influences = [index_by_id[joint_id] for joint_id in skeleton.influences]
+    return joints, joints.influences
 
 
 def create_armature(joints, name="Armature", bone_orient='VISUAL'):
@@ -113,6 +115,8 @@ def create_armature(joints, name="Armature", bone_orient='VISUAL'):
     armature_obj['lol_skl_name'] = getattr(joints, 'name', '')
     armature_obj['lol_skl_asset'] = getattr(joints, 'asset', '')
     armature_obj['lol_skl_flags'] = getattr(joints, 'flags', 0)
+    if hasattr(joints, 'influences'):
+        armature_obj['lol_skin_palette'] = json.dumps([{'native': i} for i in joints.influences])
     bpy.context.scene.collection.objects.link(armature_obj)
     bpy.context.view_layer.objects.active = armature_obj
     
@@ -213,22 +217,8 @@ def create_armature(joints, name="Armature", bone_orient='VISUAL'):
 
 
 def _store_native_props(joints, mats, armature_obj):
-    # Offset-clone joints (numeric-suffix duplicates of another joint in the
-    # same file) carry their scale dial in the bind local. Restore it to the
-    # pose channel — the addon's authoring convention for clone scale — so the
-    # viewport previews the scaled subtree and a re-export round-trips it.
-    # Deliberately NOT done for ordinary scaled native joints: their scale is
-    # already baked into the computed bone positions.
-    import re as _re
-    _names = {j.name for j in joints}
-    for joint in joints:
-        base = _re.sub(r'\.\d+$', '', joint.name)
-        if base == joint.name or base not in _names:
-            continue
-        s = joint.local_scale
-        if abs(s.x - 1.0) + abs(s.y - 1.0) + abs(s.z - 1.0) > 1e-4:
-            armature_obj.pose.bones[joint.name].scale = (s.x, s.y, s.z)
-
+    import json
+    armature_obj['lol_source_joints'] = json.dumps({str(i): j.name for i, j in enumerate(joints)})
     # Pass 5: Store bind pose for animator (scale is already baked into bone positions)
     for i, joint in enumerate(joints):
         pbone = armature_obj.pose.bones[joint.name]
@@ -249,6 +239,7 @@ def _store_native_props(joints, mats, armature_obj):
         pbone["native_bind_s"] = [joint.raw_scale.x, joint.raw_scale.y, joint.raw_scale.z]
         # Store original bone index for stable export ordering
         pbone["native_bone_index"] = i
+        pbone["native_source_name"] = joint.name
         pbone["lol_joint_flags"] = joint.flags
         pbone["lol_joint_radius"] = joint.radius
         # Store original parent name so animation correction can find the right

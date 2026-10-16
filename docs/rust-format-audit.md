@@ -1,5 +1,7 @@
 # Rust release format audit
 
+Latest SKN/SKL follow-up: [real Seraphine binary audit and standalone palette fix](skn-skl-audit.md).
+
 Compared on 2026-10-12 against the locally downloaded reference sources:
 
 - [lol_maya](https://github.com/tarngaina/lol_maya), commit `362f3e219c28d91eee3aaf8b3082faf9256618b5`.

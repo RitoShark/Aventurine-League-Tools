@@ -1,25 +1,244 @@
-"""Offset-bone helpers: bake a clone's Pose Mode offset into its rest pose.
-
-The offset-clone workflow (Shift+D a native bone, offset it, export) reads the
-offset from the clone's REST pose. Pose Mode gives live visual feedback while
-adjusting, but pose loc/rot never reaches the export — and Blender's own
-"Apply (Selected) Pose as Rest" drags children's rests along once the clone is
-spliced, silently cancelling the offset. This operator bakes the pose into the
-clone's rest by writing the edit-bone data directly (children untouched),
-splices the clone above its original if needed, and leaves the SCALE pose
-channel alone — that channel is the clone's scale dial, read at export time.
-"""
+"""Explicit offset parents and duplicate conversion. Export never reparents bones."""
 import bpy
 import mathutils
-
 from ..io import bone_utils
+from ..io.skeleton import ExportPlan
+
+
+def add_offset_parent(arm, target_name):
+    """Insert a neutral control whose exported axes match the original parent.
+
+    Moving this control in Pose Mode offsets the entire subtree. Its frame-zero
+    pose is baked with the mesh and skeleton, so stock child animation locals
+    still apply. Ordinary new joints do not receive this special export frame.
+    """
+    bpy.context.view_layer.objects.active = arm
+    if arm.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    plan = ExportPlan(arm)
+    target = arm.pose.bones[target_name]
+    if target.parent and target.parent.get('lol_offset_parent_for') == target_name:
+        raise ValueError(f'{target_name} already has an offset parent')
+    rest = target.bone.matrix_local.copy()
+    parent_rest = target.parent.bone.matrix_local.copy() if target.parent else mathutils.Matrix.Identity(4)
+    parent_k = plan.corrections[target.parent.name] if target.parent else mathutils.Matrix.Identity(4)
+    correction = rest.inverted() @ parent_rest @ parent_k
+    bpy.ops.object.mode_set(mode='EDIT')
+    bones = arm.data.edit_bones
+    child = bones[target_name]
+    control = bones.new(target_name + '_Offset')
+    control.length = max(child.length * .6, .1)
+    control.matrix = rest
+    control.parent = child.parent
+    child.use_connect = False
+    child.parent = control
+    name = control.name
+    bpy.ops.object.mode_set(mode='POSE')
+    pb = arm.pose.bones[name]
+    pb['lol_offset_parent_for'] = target_name
+    correction = pb.bone.matrix_local.inverted() @ parent_rest @ parent_k
+    pb['lol_offset_correction'] = [v for row in correction for v in row]
+    pb.rotation_mode = 'QUATERNION'
+    for bone in arm.data.bones:
+        bone.select = bone.name == name
+    arm.data.bones.active = arm.data.bones[name]
+    bpy.context.view_layer.update()
+    for bone in arm.data.bones:
+        bone.select = bone.name == name
+    arm.data.bones.active = arm.data.bones[name]
+    return arm.pose.bones[name]
+
+
+def add_offset_companion(arm, control_name, joint_name):
+    """Carry an independently animated root along with a translation offset.
+
+    Two pose-space Copy Location constraints evaluate the displacement between
+    the moved offset frame and its unmoved reference. The companion gets only
+    that displacement, retaining the root's own animation and orientation.
+    Exported ANM tracks bake the evaluated result; unchanged stock clips cannot
+    drive this extra animated root control.
+    """
+    control = arm.pose.bones[control_name]
+    joint = arm.pose.bones[joint_name]
+    if joint.parent:
+        raise ValueError(f'{joint_name}: an offset companion must be a separate root joint')
+    if not control.get('lol_offset_parent_for') or control.get('lol_offset_companion_of'):
+        raise ValueError('Select an ordinary offset parent as the displacement source')
+    plan = ExportPlan(arm)
+    parent_frame = (control.parent.bone.matrix_local @ plan.corrections[control.parent.name]
+                    if control.parent else mathutils.Matrix.Identity(4))
+    neutral_frame = parent_frame @ plan.corrections[control_name].inverted()
+    reference_name = control.get('lol_offset_reference')
+    bpy.context.view_layer.objects.active = arm
+    bpy.ops.object.mode_set(mode='EDIT')
+    bones = arm.data.edit_bones
+    if not reference_name:
+        reference = bones.new(control_name + '_Reference')
+        reference.length = bones[control_name].length
+        reference.matrix = neutral_frame
+        reference.parent = bones[control_name].parent
+        reference.use_deform = False
+        reference_name = reference.name
+    companion = bones.new(joint_name + '_Offset')
+    companion.head, companion.tail = (0, 0, 0), (0, .1, 0)
+    companion.use_deform = False
+    bones[joint_name].use_connect = False
+    bones[joint_name].parent = companion
+    companion_name = companion.name
+    bpy.ops.object.mode_set(mode='POSE')
+    arm.pose.bones[control_name]['lol_offset_reference'] = reference_name
+    arm.pose.bones[reference_name]['lol_offset_reference_for'] = control_name
+    pb = arm.pose.bones[companion_name]
+    pb['lol_offset_parent_for'] = joint_name
+    pb['lol_offset_companion_of'] = control_name
+    pb['lol_offset_correction'] = [v for row in mathutils.Matrix.Identity(4) for v in row]
+    pb.rotation_mode = 'QUATERNION'
+    for target, negate in ((control_name, False), (reference_name, True)):
+        constraint = pb.constraints.new('COPY_LOCATION')
+        constraint.name = 'Offset displacement' if not negate else 'Subtract original frame'
+        constraint.target = arm
+        constraint.subtarget = target
+        constraint.owner_space = constraint.target_space = 'POSE'
+        constraint.use_offset = negate
+        constraint.invert_x = constraint.invert_y = constraint.invert_z = negate
+    arm['lol_requires_animation_export'] = True
+    bpy.context.view_layer.update()
+    return pb
+
+
+def find_snap_roots(arm, target_name):
+    # Only recognize original Riot joints with an explicit matching _Snap name.
+    # Arbitrary added bones are not inferred/reparented from naming conventions.
+    plan = ExportPlan(arm)
+    target = arm.pose.bones[target_name]
+    subtree = {target.name} | {pb.name for pb in target.children_recursive}
+    candidates = [pb.name for pb in plan.owners.values()
+                  if pb.parent is None and pb.name.endswith('_Snap')
+                  and pb.name[:-5] in subtree]
+    return candidates
+
+
+def apply_offset_bind(arm):
+    """Bake static control offsets into mesh rest vertices and armature rest.
+
+    Rebinding both is essential at vertices with weights across the offset boundary.
+    Baking only the exported mesh would disagree with Blender's original inverse binds.
+    """
+    scene = bpy.context.scene
+    old_frame = scene.frame_current
+    bpy.context.view_layer.objects.active = arm
+    if arm.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    meshes = [obj for obj in scene.objects if obj.type == 'MESH' and obj.find_armature() == arm]
+    controls = [pb for pb in arm.pose.bones if pb.get('lol_offset_parent_for')]
+    if not controls:
+        raise ValueError('No explicit offset parents in this armature')
+    # This operation is for a static bind edit, not baking an animated control.
+    action = arm.animation_data.action if arm.animation_data else None
+    if action and hasattr(action, 'fcurves'):
+        paths = [pb.path_from_id() for pb in controls]
+        if any(any(fc.data_path.startswith(path + '.') for path in paths) for fc in action.fcurves):
+            raise ValueError('Offset controls have animation keys; use a static control for a bind edit')
+    for obj in meshes:
+        if obj.data.users > 1:
+            raise ValueError(f'{obj.name}: make the mesh single-user before changing its bind pose')
+        if obj.data.shape_keys:
+            raise ValueError(f'{obj.name}: apply or remove shape keys before changing the bind pose')
+        if any(mod.show_viewport and mod.type != 'ARMATURE' for mod in obj.modifiers):
+            raise ValueError(f'{obj.name}: apply other modifiers before changing the bind pose')
+    try:
+        scene.frame_set(0)
+        bpy.context.view_layer.update()
+        # Frame zero is the bind pose. Reject unrelated posed native joints.
+        for pb in arm.pose.bones:
+            if pb not in controls and max(abs(pb.matrix_basis[r][c] - (1 if r == c else 0))
+                                         for r in range(4) for c in range(4)) > 1e-4:
+                raise ValueError(f'{pb.name} is posed at frame 0. Restore its bind pose first')
+        for pb in controls:
+            if pb.get('lol_offset_reference'):
+                _, rotation, scale = pb.matrix_basis.decompose()
+                if abs(rotation.w) < 1 - 1e-6 or max(abs(v - 1) for v in scale) > 1e-5:
+                    raise ValueError(f'{pb.name}: linked root companions support translation offsets only')
+        dg = bpy.context.evaluated_depsgraph_get()
+        baked = {}
+        for obj in meshes:
+            evaluated = obj.evaluated_get(dg)
+            mesh = evaluated.to_mesh()
+            try:
+                if len(mesh.vertices) != len(obj.data.vertices):
+                    raise ValueError(f'{obj.name}: bind bake changed mesh topology')
+                from ..io.export_skn import _corner_normals
+                baked[obj.name] = ([v.co.copy() for v in mesh.vertices], _corner_normals(mesh))
+            finally:
+                evaluated.to_mesh_clear()
+        bpy.ops.object.mode_set(mode='POSE')
+        bpy.ops.pose.armature_apply(selected=False)
+        bpy.ops.object.mode_set(mode='OBJECT')
+        for obj in meshes:
+            positions, normals = baked[obj.name]
+            for vertex, position in zip(obj.data.vertices, positions):
+                vertex.co = position
+            obj.data.update()
+            obj.data.normals_split_custom_set(normals)
+        for pb in controls:
+            pb['lol_offset_bind_applied'] = True
+    finally:
+        scene.frame_set(old_frame)
+        bpy.context.view_layer.update()
+
+
+class LOL_OT_LinkOffsetCompanion(bpy.types.Operator):
+    """Select a separate root and make its offset parent active to link their displacement"""
+    bl_idname = 'lol_offset.link_companion'
+    bl_label = 'Link Selected Root to Offset'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'POSE' and context.active_pose_bone is not None
+                and bool(context.active_pose_bone.get('lol_offset_parent_for')))
+
+    def execute(self, context):
+        arm = context.active_object
+        control = context.active_pose_bone.name
+        names = [pb.name for pb in context.selected_pose_bones if pb.name != control]
+        if not names or any(arm.pose.bones[name].parent for name in names):
+            self.report({'ERROR'}, 'Select separate root joints and make the offset parent active')
+            return {'CANCELLED'}
+        try:
+            for name in names:
+                add_offset_companion(arm, control, name)
+            self.report({'INFO'}, 'Roots linked. Apply Offset to Bind Pose and export updated ANMs.')
+            return {'FINISHED'}
+        except Exception as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+
+
+class LOL_OT_ApplyOffsetBind(bpy.types.Operator):
+    """Bake static offsets into the mesh and skeleton bind pose together"""
+    bl_idname = 'lol_offset.apply_bind'
+    bl_label = 'Apply Offset to Bind Pose'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and context.active_object.type == 'ARMATURE'
+
+    def execute(self, context):
+        try:
+            apply_offset_bind(context.active_object)
+            self.report({'INFO'}, 'Mesh and skeleton bind pose updated; ready to export')
+            return {'FINISHED'}
+        except Exception as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
 
 
 class LOL_OT_SetOffsetFromPose(bpy.types.Operator):
-    """Bake the selected offset clone's Pose Mode position/rotation into its rest pose.
-Children are untouched, and the clone's Scale stays in the pose channel (the scale dial)"""
-    bl_idname = "lol_offset.set_from_pose"
-    bl_label = "Set Offset from Pose"
+    """Insert an offset control above the active bone; move it in Pose Mode"""
+    bl_idname = 'lol_offset.set_from_pose'
+    bl_label = 'Add Offset Parent'
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -28,98 +247,22 @@ Children are untouched, and the clone's Scale stays in the pose channel (the sca
 
     def execute(self, context):
         arm = context.active_object
-        clones = bone_utils.detect_offset_clones(arm)
-        if not clones:
-            self.report({'ERROR'}, "No offset clone found. Shift+D a skeleton bone first "
-                                   "(the duplicate keeps a name like 'Bone.001')")
+        active = arm.data.edit_bones.active if arm.mode == 'EDIT' else arm.data.bones.active
+        if active is None:
+            self.report({'ERROR'}, 'Select the bone to offset')
             return {'CANCELLED'}
-
-        # Resolve which clone to bake: active bone, unique selected, or the only one.
-        clone_name = None
-        active = context.active_pose_bone
-        if active is not None and active.name in clones:
-            clone_name = active.name
-        elif active is not None and active.name in clones.values():
-            matches = [c for c, t in clones.items() if t == active.name]
-            if len(matches) == 1:
-                clone_name = matches[0]
-        if clone_name is None:
-            selected = [pb.name for pb in (context.selected_pose_bones or []) if pb.name in clones]
-            if len(selected) == 1:
-                clone_name = selected[0]
-        if clone_name is None and len(clones) == 1:
-            clone_name = next(iter(clones))
-        if clone_name is None:
-            self.report({'ERROR'}, f"Select the clone to bake. Found: {', '.join(sorted(clones))}")
-            return {'CANCELLED'}
-
-        target_name = clones[clone_name]
-        clone_pb = arm.pose.bones[clone_name]
-        target_pb = arm.pose.bones[target_name]
-
-        # The offset is the POSE DISPLACEMENT applied to the ORIGINAL bone's
-        # placement — NOT the clone's total position. Users park the clone
-        # aside in Edit Mode just to be able to select it; that parking move
-        # must not leak into the export (it isn't part of the preview either:
-        # while posing, the children follow only the pose displacement).
-        posed_t, posed_r, _ps = clone_pb.matrix.decompose()
-        posed_rigid = mathutils.Matrix.LocRotScale(posed_t, posed_r, None)
         try:
-            delta_world = posed_rigid @ clone_pb.bone.matrix_local.inverted()
-        except ValueError:
-            delta_world = mathutils.Matrix.Identity(4)
-
-        dw_t = delta_world.to_translation().length
-        dw_r = delta_world.to_quaternion().angle
-        dw_r = min(abs(dw_r), abs(6.2831853 - dw_r))
-        has_pose_offset = dw_t > 1e-5 or dw_r > 1e-4
-
-        if has_pose_offset:
-            # New rest = original bone's rest displaced by the pose delta.
-            t, r, _s2 = (delta_world @ target_pb.bone.matrix_local).decompose()
-        else:
-            # No pose displacement: keep whatever offset was authored in Edit
-            # Mode untouched (only splice below if needed).
-            t, r = None, None
-
-        bpy.ops.object.mode_set(mode='EDIT')
-        eb = arm.data.edit_bones
-        e_clone = eb.get(clone_name)
-        e_target = eb.get(target_name)
-        spliced_now = False
-        if e_clone is not None and e_target is not None and e_target.parent != e_clone:
-            e_clone.parent = e_target.parent
-            e_target.parent = e_clone
-            e_target.use_connect = False
-            spliced_now = True
-        if e_clone is not None and t is not None:
-            # Direct edit-bone write: bakes ONLY the clone's rest. Blender's
-            # armature_apply would preserve children's parent-relative rests,
-            # dragging the whole subtree along and cancelling the offset.
-            e_clone.matrix = mathutils.Matrix.LocRotScale(t, r, None)
-        bpy.ops.object.mode_set(mode='POSE')
-
-        clone_pb = arm.pose.bones[clone_name]
-        clone_pb.location = (0.0, 0.0, 0.0)
-        if clone_pb.rotation_mode == 'QUATERNION':
-            clone_pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
-        elif clone_pb.rotation_mode == 'AXIS_ANGLE':
-            clone_pb.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
-        else:
-            clone_pb.rotation_euler = (0.0, 0.0, 0.0)
-
-        if t is not None:
-            msg = f"Offset baked into rest pose of '{clone_name}' (pose displacement vs '{target_name}')"
-        else:
-            msg = f"No pose offset on '{clone_name}' — existing Edit Mode offset kept"
-        if spliced_now:
-            msg += f" (spliced above '{target_name}')"
-        sc = clone_pb.scale
-        if abs(sc.x - 1.0) + abs(sc.y - 1.0) + abs(sc.z - 1.0) > 1e-5:
-            msg += f"; scale dial kept in pose: ({sc.x:.2f}, {sc.y:.2f}, {sc.z:.2f})"
-        msg += ". Bones snap back visually — the offset lives in playback."
-        self.report({'INFO'}, msg)
-        return {'FINISHED'}
+            pb = add_offset_parent(arm, active.name)
+            roots = find_snap_roots(arm, pb.get('lol_offset_parent_for'))
+            if roots:
+                self.report({'WARNING'}, 'Separate roots stay outside this offset: ' + ', '.join(roots)
+                            + '. Check their skin weights before using unchanged animations.')
+            else:
+                self.report({'INFO'}, f'Move {pb.name}, then Apply Offset to Bind Pose.')
+            return {'FINISHED'}
+        except Exception as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
 
 
 # Native-skeleton data the importer stamps onto every bone.  A Shift+D
@@ -127,19 +270,13 @@ Children are untouched, and the clone's Scale stays in the pose channel (the sca
 # into a plain new bone that exports at its authored placement.
 _STALE_NATIVE_PROPS = (
     "native_bone_index", "native_bind_t", "native_bind_r", "native_bind_s",
-    "native_global_rest_mat", "native_parent", "native_matrix_local",
+    "native_global_rest_mat", "native_parent", "native_matrix_local", "native_source_name",
 )
 
 
 class LOL_OT_ConvertToNewBone(bpy.types.Operator):
-    """Turn the selected bones into brand-new joints for export.
-
-Use this on bones you built by duplicating (Shift+D) a skeleton bone — cape,
-cloth or accessory chains.  Blender copies the original's hidden native-skeleton
-data onto the duplicate, so the exporter mistakes it for the original joint and
-collapses it onto the original's position/rotation in game.  This strips that
-copied data so the bone exports where you actually placed it.  The genuine
-skeleton bone that owns each index is protected and skipped"""
+    """Clear copied source metadata from selected duplicate joints.
+Duplicates already export as new joints; this removes their unused source tags."""
     bl_idname = "lol_bone.convert_to_new"
     bl_label = "Convert to New Bone(s)"
     bl_options = {'REGISTER', 'UNDO'}
@@ -204,9 +341,13 @@ skeleton bone that owns each index is protected and skipped"""
 
 def register():
     bpy.utils.register_class(LOL_OT_SetOffsetFromPose)
+    bpy.utils.register_class(LOL_OT_ApplyOffsetBind)
+    bpy.utils.register_class(LOL_OT_LinkOffsetCompanion)
     bpy.utils.register_class(LOL_OT_ConvertToNewBone)
 
 
 def unregister():
     bpy.utils.unregister_class(LOL_OT_ConvertToNewBone)
+    bpy.utils.unregister_class(LOL_OT_LinkOffsetCompanion)
+    bpy.utils.unregister_class(LOL_OT_ApplyOffsetBind)
     bpy.utils.unregister_class(LOL_OT_SetOffsetFromPose)

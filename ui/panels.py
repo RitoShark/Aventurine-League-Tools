@@ -112,17 +112,21 @@ class LOL_PT_MainPanel(Panel):
         else:
             box.label(text="No bind pose set", icon='INFO')
 
-        # Offset Bones section (Shift+D clone workflow)
+        # Explicit controls for static subtree offsets.
         box = layout.box()
         box.label(text="Offset Bones", icon='CON_LOCLIKE')
         row = box.row(align=True)
         row.scale_y = 1.2
         row.enabled = in_pose_mode
-        row.operator("lol_offset.set_from_pose", text="Set Offset from Pose", icon='ORIENTATION_LOCAL')
+        row.operator("lol_offset.set_from_pose", text="Add Offset Parent", icon='ORIENTATION_LOCAL')
+        box.operator("lol_offset.apply_bind", text="Apply Offset to Bind Pose", icon='ARMATURE_DATA')
+        box.operator("lol_offset.link_companion", text="Link Root (Requires ANM Export)", icon='CONSTRAINT_BONE')
+        if (context.active_object and context.active_object.type == 'ARMATURE'
+                and any(pb.get('lol_offset_companion_of') for pb in context.active_object.pose.bones)):
+            box.label(text="Linked roots: export updated ANMs too", icon='INFO')
 
-        # Convert duplicated skeleton bones (Shift+D) into genuine new joints so
-        # cape/cloth/accessory chains export at their authored position instead
-        # of collapsing onto the bone they were copied from.
+
+        # Optional cleanup of copied native metadata.
         in_bone_edit = bool(context.active_object and
                             context.active_object.type == 'ARMATURE' and
                             context.mode in ('POSE', 'EDIT_ARMATURE'))
