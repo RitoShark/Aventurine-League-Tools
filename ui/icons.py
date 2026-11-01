@@ -19,6 +19,8 @@ def register():
     pcoll.load("icon_54", os.path.join(icons_dir, "54.png"), 'IMAGE')
     pcoll.load("icon_55", os.path.join(icons_dir, "55.png"), 'IMAGE')
 
+    pcoll.load("material_order", os.path.join(icons_dir, "currency_wars_climbing_the_ranks.png"), 'IMAGE')
+
     preview_collections["main"] = pcoll
 
 def unregister():

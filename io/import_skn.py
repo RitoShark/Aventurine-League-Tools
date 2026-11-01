@@ -6,7 +6,7 @@ import struct
 import base64
 from ..utils.binary_utils import Vector
 from ..utils.backend import require_ritoshark
-from . import import_skl
+from . import import_skl, skin_normals
 from ..utils import texture_manager
 
 
@@ -81,11 +81,9 @@ def create_mesh(indices, vertices, submeshes, name, armature_obj=None, joints=No
         # Positions are reflected while triangle winding is retained. Transform
         # normals with the cofactor (-P), matching the export convention.
         normals = [(v.normal.x, v.normal.z, -v.normal.y) for v in vertices]
-        for polygon in mesh.polygons:
-            polygon.use_smooth = True
-        if hasattr(mesh, 'use_auto_smooth'):
-            mesh.use_auto_smooth = True
-        mesh.normals_split_custom_set_from_vertices(normals)
+        # Keep the legacy flat viewport appearance. Export normals live in a
+        # separate attribute and are enabled only on temporary export copies.
+        skin_normals.store(mesh, [normals[loop.vertex_index] for loop in mesh.loops])
     
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.scene.collection.objects.link(obj)
@@ -160,6 +158,9 @@ def create_mesh(indices, vertices, submeshes, name, armature_obj=None, joints=No
             for joint_idx, combined_weight in v_weights.items():
                 group_map[joint_idx].add([vtx_idx], combined_weight, 'ADD')
     
+    from . import material_order
+    material_order.remember_source(obj, armature_obj, [sm.name for sm in submeshes])
+
     if obj.get('lol_skn_has_tangents'):
         from .export_skn import tangent_basis_signature
         obj['lol_skn_tangent_basis'] = tangent_basis_signature(mesh)
@@ -213,6 +214,13 @@ def load(operator, context, filepath, load_skl_file=True, split_by_material=Fals
                         obj.name = mat.name
                     obj["lol_skn_filepath"] = filepath
                     obj["lol_skn_filename"] = os.path.basename(filepath)
+                    # Separation copies corner attributes; only the topology
+                    # signature changes, not the retained normals or positions.
+                    if skin_normals.ATTRIBUTE in obj.data.attributes:
+                        obj.data[skin_normals.BASIS] = skin_normals.geometry_signature(obj.data)
+                    if obj.get('lol_skn_has_tangents'):
+                        from .export_skn import tangent_basis_signature
+                        obj['lol_skn_tangent_basis'] = tangent_basis_signature(obj.data)
         else:
             mesh_obj["lol_skn_filepath"] = filepath
             mesh_obj["lol_skn_filename"] = os.path.basename(filepath)

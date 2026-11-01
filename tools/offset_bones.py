@@ -159,18 +159,21 @@ def apply_offset_bind(arm):
                 _, rotation, scale = pb.matrix_basis.decompose()
                 if abs(rotation.w) < 1 - 1e-6 or max(abs(v - 1) for v in scale) > 1e-5:
                     raise ValueError(f'{pb.name}: linked root companions support translation offsets only')
-        dg = bpy.context.evaluated_depsgraph_get()
-        baked = {}
-        for obj in meshes:
-            evaluated = obj.evaluated_get(dg)
-            mesh = evaluated.to_mesh()
-            try:
-                if len(mesh.vertices) != len(obj.data.vertices):
-                    raise ValueError(f'{obj.name}: bind bake changed mesh topology')
-                from ..io.export_skn import _corner_normals
-                baked[obj.name] = ([v.co.copy() for v in mesh.vertices], _corner_normals(mesh))
-            finally:
-                evaluated.to_mesh_clear()
+        from ..io import skin_normals
+        keep_flat = {obj.name: skin_normals.preserved(obj.data) is not None for obj in meshes}
+        with skin_normals.export_meshes(meshes):
+            dg = bpy.context.evaluated_depsgraph_get()
+            baked = {}
+            for obj in meshes:
+                evaluated = obj.evaluated_get(dg)
+                mesh = evaluated.to_mesh()
+                try:
+                    if len(mesh.vertices) != len(obj.data.vertices):
+                        raise ValueError(f'{obj.name}: bind bake changed mesh topology')
+                    from ..io.export_skn import _corner_normals
+                    baked[obj.name] = ([v.co.copy() for v in mesh.vertices], _corner_normals(mesh))
+                finally:
+                    evaluated.to_mesh_clear()
         bpy.ops.object.mode_set(mode='POSE')
         bpy.ops.pose.armature_apply(selected=False)
         bpy.ops.object.mode_set(mode='OBJECT')
@@ -179,7 +182,10 @@ def apply_offset_bind(arm):
             for vertex, position in zip(obj.data.vertices, positions):
                 vertex.co = position
             obj.data.update()
-            obj.data.normals_split_custom_set(normals)
+            if keep_flat[obj.name]:
+                skin_normals.store(obj.data, normals)
+            else:
+                obj.data.normals_split_custom_set(normals)
         for pb in controls:
             pb['lol_offset_bind_applied'] = True
     finally:

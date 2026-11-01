@@ -91,7 +91,11 @@ class ReleaseTests(unittest.TestCase):
         self.source()
         for name in ('LICENSE', 'README.md', 'THIRD_PARTY_LICENSES.md', 'vendor/ritoshark/ritoshark.pyd',
                      'vendor/licenses/LICENSE-MIT', 'io/example.py', 'io/__pycache__/example.pyc',
-                     'tests/test_example.py', 'unrelated-project/private.txt', '.git/ignored.txt'):
+                     'tests/test_example.py', 'unrelated-project/private.txt', '.git/ignored.txt',
+                     'docs/guide.md', 'icons/50.png',
+                     'docs/images/aventurine-wordmark.png', 'docs/images/aventurine-wordmark.pptx',
+                     'docs/images/wordmark-source.txt', 'docs/pose-bind-investigation.md',
+                     'docs/yone-export-regression.md'):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b'fixture')
@@ -101,6 +105,13 @@ class ReleaseTests(unittest.TestCase):
             self.assertIn('Aventurine/__init__.py', names)
             self.assertIn('Aventurine/vendor/ritoshark/ritoshark.pyd', names)
             self.assertIn('Aventurine/vendor/licenses/LICENSE-MIT', names)
+            self.assertIn('Aventurine/docs/guide.md', names)
+            self.assertIn('Aventurine/icons/50.png', names)
+            for excluded in ('docs/images/aventurine-wordmark.png',
+                             'docs/images/aventurine-wordmark.pptx',
+                             'docs/images/wordmark-source.txt',
+                             'docs/pose-bind-investigation.md', 'docs/yone-export-regression.md'):
+                self.assertNotIn('Aventurine/' + excluded, names)
             self.assertFalse(any(part in name for name in names for part in ('__pycache__', '/tests/', '.git/', 'private.txt')))
 
     def test_version_is_read_without_importing_blender(self):

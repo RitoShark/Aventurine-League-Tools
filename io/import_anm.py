@@ -55,13 +55,13 @@ def read_anm(filepath):
 
 
 def apply_anm(anm, armature_obj, frame_offset=0, flip=False, adapt_to_edits=False, skip_custom_parent_pin=False):
-    """Apply full TRS tracks; neutral inserted parents preserve source motion.
+    """Apply absolute ANM locals relative to the current Blender rest pose.
 
-    A clip with tracks for added joints uses the current exported hierarchy.
-    A stock clip uses the recorded source local frames; inserted controls then
-    layer their authored transforms onto the original motion without pinning it.
+    Blender's Apply Pose as Rest Pose is the binding operation. Imported visual
+    bone axes retain their correction, but old rest offsets must not be added to
+    animation. Untracked custom joints retain their authored control transforms.
     """
-    from .skeleton import ExportPlan, stored_matrix, P
+    from .skeleton import ExportPlan, P
     if armature_obj.type != 'ARMATURE':
         return
     plan = ExportPlan(armature_obj)
@@ -76,9 +76,6 @@ def apply_anm(anm, armature_obj, frame_offset=0, flip=False, adapt_to_edits=Fals
     def track_for(pb):
         return (tracks.get(Hash.elf(plan.names[pb.name])) or tracks.get(Hash.elf(pb.name))
                 or (tracks.get(Hash.elf(pb.get('native_source_name', pb.name))) if pb.name in plan.native else None))
-    current_hierarchy = any(track_for(pb) for pb in plan.bones if pb.name not in plan.native)
-    source_names = {pb.get('native_source_name', pb.name): pb for pb in plan.owners.values()}
-    source_names.update({pb.name: pb for pb in plan.owners.values()})
     bone_keyframes = {}
     pi = P.inverted()
     for pb in plan.bones:
@@ -89,18 +86,9 @@ def apply_anm(anm, armature_obj, frame_offset=0, flip=False, adapt_to_edits=Fals
             continue
         pb.rotation_mode = 'QUATERNION'
         k = plan.corrections[pb.name]
-        if pb.name in plan.native and not current_hierarchy:
-            v = stored_matrix(pb, 'native_matrix_local')
-            if v is None:
-                v = pb.bone.matrix_local.copy()
-            parent = source_names.get(pb.get('native_parent', ''))
-            vp = stored_matrix(parent, 'native_matrix_local') if parent else None
-            if parent and vp is None:
-                vp = parent.bone.matrix_local.copy()
-            rest = vp.inverted() @ v if vp is not None else v
-        else:
-            parent = pb.parent
-            rest = parent.bone.matrix_local.inverted() @ pb.bone.matrix_local if parent else pb.bone.matrix_local.copy()
+        parent = pb.parent
+        rest = (parent.bone.matrix_local.inverted() @ pb.bone.matrix_local
+                if parent else pb.bone.matrix_local.copy())
         kp = plan.corrections[parent.name] if parent else mathutils.Matrix.Identity(4)
         # Rest local in the same exported joint frames as SKL and ANM.
         default = pi @ kp.inverted() @ rest @ k @ P

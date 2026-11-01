@@ -1,3 +1,19 @@
+## Committing fitted bones with their bound meshes
+
+Use **Pose > Apply > Apply Pose as Rest Pose (Keep Bound Meshes)** for imported League
+rigs. Pose the original bound body and props to fit an unbound replacement, commit them
+together, delete only the unwanted original geometry, then bind the replacement.
+Hidden/excluded bound meshes are included; the unbound replacement is untouched.
+See [workflow and tests](bound-mesh-rest-pose.md). The earlier bones-only workflow below
+refers to Blender's raw rest operator, which remains accessible but does not bake meshes.
+
+# Current rest-pose workflow
+
+Adjust bones in Blender Pose Mode, then use Blender's **Apply Pose as Rest Pose**.
+Normal SKN/SKL export uses that rest automatically. Incoming ANM locals are converted
+against the current rest and actual parent links. No fitting mode or automatic ANM
+rewriting is involved. See [validation and limits](rest-pose-test-results.md).
+
 # Added bones and offset parents
 
 Ordinary new bones, including Shift+D duplicates, export as real joints. New joints
@@ -68,12 +84,10 @@ in an exported ANM, including duplicates and custom joints. Full translation, ro
 and scale are retained below inserted parents.
 
 Visual-pose export still uses frame zero as the mesh/skeleton bind pose; it uses the same
-joint axes as ordinary animation export. Batch conversion uses the same importer and
-exporter, forwards scale/transform/name options, stages clip outputs before replacement,
-and restores the scene's action and pose afterwards.
+joint axes as ordinary animation export. Automatic batch conversion has been removed; ordinary model export never rewrites ANMs.
 
 Arbitrary reparenting is not the same as adding a leaf or using the explicit offset
-control. Re-export/bake animations for a changed general hierarchy. The three Maya tests
+control. Unchanged ANM locals follow the actual new hierarchy, as in Maya; arbitrary inserted parents are not silently compensated. The three Maya tests
 cover added leaves, translated shoulder controls, and an animated cape. They do not
 establish compatibility for every old offset rig, nonuniform scale/shear, or physics rig.
 Older .blend files with several renamed copies of one native ID can be ambiguous;

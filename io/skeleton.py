@@ -13,6 +13,21 @@ def stored_matrix(pb, key):
     return Matrix([values[i:i+4] for i in range(0, 16, 4)]) if values is not None and len(values) == 16 else None
 
 
+def decompose_trs(matrix, label):
+    """Reject shear/singular transforms instead of silently approximating them."""
+    import math
+    t, r, s = matrix.decompose()
+    if any(not math.isfinite(v) for row in matrix for v in row) or min(abs(v) for v in s) < 1e-8:
+        raise ValueError(f'{label}: invalid or zero-scale transform')
+    rebuilt = Matrix.LocRotScale(t, r, s)
+    magnitude = max(1.0, max(abs(matrix[row][col]) for row in range(3) for col in range(3)))
+    error = max(abs(matrix[row][col] - rebuilt[row][col]) for row in range(3) for col in range(3))
+    if error > 2e-5 * magnitude:
+        raise ValueError(f'{label}: transform contains shear that SKL/ANM TRS cannot preserve. '
+                         'Use uniform bone/object scale or bake the stretch into the mesh.')
+    return t, r, s
+
+
 def native_owners(arm):
     registry = json.loads(arm.get('lol_source_joints', '{}'))
     groups = {}
@@ -77,6 +92,16 @@ class ExportPlan:
                 if k is None:
                     raise ValueError(f'Offset parent {pb.name!r} has no neutral export frame')
             self.corrections[pb.name] = k
+
+    def validate_bind_transforms(self, globals):
+        locals = self.locals(globals)
+        for pb in self.bones:
+            decompose_trs(locals[pb.name], f'{pb.name}: local bind')
+            try:
+                inverse = globals[pb.name].inverted()
+            except ValueError as error:
+                raise ValueError(f'{pb.name}: singular bind transform') from error
+            decompose_trs(inverse, f'{pb.name}: inverse bind')
 
     def skin_palette(self):
         """Resolve slots of the imported or most recently exported SKN/SKL pair.

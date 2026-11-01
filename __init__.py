@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (4, 0, 1),
+    "version": (4, 1, 0),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -28,6 +28,7 @@ from .utils import history
 from .io import texture_ops
 from .io import file_handlers
 from .tools import smart_weights
+from .tools import material_order as material_order_tools
 # Note: retarget, physics, and boobs_physics are now under .extras and loaded conditionally
 
 def update_physics(self, context):
@@ -89,6 +90,7 @@ def update_animation_tools(self, context):
             self.enable_retarget = True
             self.enable_anim_loader = True
             self.enable_skin_tools = True
+            self.enable_material_order = True
             self.enable_boobs_physics = True
             self.enable_hair_physics = True
         else:
@@ -97,6 +99,7 @@ def update_animation_tools(self, context):
             self.enable_retarget = False
             self.enable_anim_loader = False
             self.enable_skin_tools = False
+            self.enable_material_order = False
             self.enable_boobs_physics = False
             self.enable_hair_physics = False
     except Exception as e:
@@ -111,6 +114,11 @@ def update_skin_tools(self, context):
             smart_weights.unregister_panel()
     except Exception as e:
         print(f"Error toggling skin tools: {e}")
+
+def update_material_order(self, context):
+    """Keep material-order visibility in sync with the individual and Misc toggles."""
+    material_order_tools.sync_panel(self)
+
 
 def update_mapgeo_tools(self, context):
     """Toggle the dedicated Aventurine MapGeo N-panel tab"""
@@ -162,6 +170,13 @@ class LolAddonPreferences(bpy.types.AddonPreferences):
         description="Enable the skin tools panel for automatic weight painting",
         default=True,
         update=update_skin_tools
+    )
+
+    enable_material_order: BoolProperty(
+        name="SKN Material Order",
+        description="Show the material export-order panel in Misc LoL Tools",
+        default=True,
+        update=update_material_order
     )
 
     enable_boobs_physics: BoolProperty(
@@ -295,13 +310,14 @@ class LolAddonPreferences(bpy.types.AddonPreferences):
         sub = box.box()
         sub.enabled = self.enable_animation_tools
         sub.prop(self, "enable_skin_tools")
+        sub.prop(self, "enable_material_order")
         sub.prop(self, "enable_physics")
         sub.prop(self, "enable_retarget")
         sub.prop(self, "enable_anim_loader")
         sub.prop(self, "enable_boobs_physics")
         sub.prop(self, "enable_hair_physics")
 
-        # MapGeo Tools (standalone — niche map-making workflow, off by default)
+        # MapGeo Tools (standalone â€” niche map-making workflow, off by default)
         box.prop(self, "enable_mapgeo_tools")
 
         # Drag & Drop Setting
@@ -659,7 +675,7 @@ class ImportMAPGEO(bpy.types.Operator, ImportHelper):
     name_by_material: BoolProperty(
         name="Name by Material",
         description="Name objects after their dominant material instead of MapGeo_Instance_N "
-                    "(maps newer than v11 store no mesh names). Cosmetic only — "
+                    "(maps newer than v11 store no mesh names). Cosmetic only â€” "
                     "not written back on export",
         default=True
     )
@@ -763,7 +779,7 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
         name="Apply Object Transform",
         description="Bake the armature/mesh object's rotation, scale and position into the "
                     "export so it matches what you see in Blender. Leave on for FBX/external "
-                    "rigs whose up-axis correction lives in the object transform — turning it "
+                    "rigs whose up-axis correction lives in the object transform â€” turning it "
                     "off exports armature-local data and can ship the model rotated/mis-scaled. "
                     "No-op when the object is already at identity",
         default=True
@@ -794,21 +810,9 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
     )
 
     use_visual_pose: BoolProperty(
-        name="Use Visual Rest Pose (Experimental)",
-        description="Export bones using their current visual rest pose instead of the original imported transforms. Enable this if you moved bones in Edit Mode and want the changes to be exported",
+        name="Bake Frame 0 Pose",
+        description="Export the evaluated frame-zero pose. Leave off after Blender Apply Pose as Rest Pose; normal export already uses the current rest pose",
         default=False
-    )
-
-    unmodified_league_armature: BoolProperty(
-        name="Unmodified League Armature",
-        description=(
-            "Keep enabled for standard exports. "
-            "Disable when exporting a visually-edited armature: the exporter will "
-            "locate an 'animations' folder next to the SKN, back up all .anm files "
-            "to 'Unmodified_anm_backup', then re-export each one so the animation "
-            "transforms match the visual skeleton."
-        ),
-        default=True
     )
 
     target_armature_name: StringProperty(options={'HIDDEN'})
@@ -824,8 +828,6 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
         layout.prop(self, "disable_scaling")
         layout.prop(self, "disable_transforms")
         layout.prop(self, "use_visual_pose")
-        layout.separator()
-        layout.prop(self, "unmodified_league_armature")
 
     def invoke(self, context, event):
         # Try to get stored path from mesh or armature
@@ -854,9 +856,8 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
         from .io import export_skn
 
         target_armature = context.scene.objects.get(self.target_armature_name) if self.target_armature_name else None
-        effective_visual_pose = self.use_visual_pose or (not self.unmodified_league_armature)
 
-        # Resolve armature once — used for parenting fix, export, and anim processing.
+        # Resolve the armature for export and its remembered output path.
         arm = target_armature
         if not arm:
             arm = context.active_object if context.active_object and context.active_object.type == 'ARMATURE' else None
@@ -868,7 +869,7 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
             target_armature=target_armature,
             disable_scaling=self.disable_scaling,
             disable_transforms=self.disable_transforms,
-            use_visual_pose=effective_visual_pose,
+            use_visual_pose=self.use_visual_pose,
             apply_object_transform=self.apply_object_transform,
             model_scale=self.model_scale,
         )
@@ -877,23 +878,6 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
         # correct directory for subsequent exports.
         if result == {'FINISHED'} and arm:
             arm["lol_skn_filepath"] = self.filepath
-
-        if result == {'FINISHED'} and not self.unmodified_league_armature:
-            if arm:
-                try:
-                    export_skn.process_animations_visual(
-                        self, context, self.filepath, arm,
-                        disable_scaling=self.disable_scaling,
-                        disable_transforms=self.disable_transforms,
-                        clean_names=self.clean_names,
-                        anim_scale=self.model_scale,
-                        apply_object_transform=self.apply_object_transform)
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    self.report({'WARNING'}, f"Animation export failed: {e}")
-            else:
-                self.report({'WARNING'}, "No Armature found — skipping animation export")
 
         return result
 
@@ -926,7 +910,7 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
         name="Apply Object Transform",
         description="Bake the armature object's rotation, scale and position into the export "
                     "so it matches what you see in Blender. Leave on for FBX/external rigs "
-                    "whose up-axis correction lives in the object transform — turning it off "
+                    "whose up-axis correction lives in the object transform â€” turning it off "
                     "exports armature-local data and can ship the skeleton rotated/mis-scaled. "
                     "No-op when the object is already at identity",
         default=True
@@ -957,8 +941,8 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
     )
 
     use_visual_pose: BoolProperty(
-        name="Use Visual Rest Pose (Experimental)",
-        description="Export bones using their current visual rest pose instead of the original imported transforms. Enable this if you moved bones in Edit Mode and want the changes to be exported",
+        name="Bake Frame 0 Pose",
+        description="Export the evaluated frame-zero pose. Leave off after Blender Apply Pose as Rest Pose; normal export already uses the current rest pose",
         default=False
     )
 
@@ -1065,7 +1049,7 @@ class ExportANM(bpy.types.Operator, ExportHelper):
         name="Apply Object Transform",
         description="Bake the armature object's rotation, scale and position into the animation, "
                     "matching the SKN/SKL export. Required for FBX/external rigs whose up-axis "
-                    "correction and unit scale live in the object transform — without it the "
+                    "correction and unit scale live in the object transform â€” without it the "
                     "animation plays rotated and mis-scaled even when the SKL/SKN are correct. "
                     "Keep this matched to the SKN/SKL setting. No-op when the object is at identity",
         default=True
@@ -1075,7 +1059,7 @@ class ExportANM(bpy.types.Operator, ExportHelper):
         name="Scale",
         description="Extra manual multiplier on the animation's translations, on top of the "
                     "normal 100x export scale and any object transform. Leave at 1.0 normally; "
-                    "use it for one-off fixes (e.g. an animation that comes in 20%% too big — "
+                    "use it for one-off fixes (e.g. an animation that comes in 20%% too big â€” "
                     "set 0.8)",
         default=1.0,
         min=0.0001,
@@ -1320,6 +1304,9 @@ def register():
     
     # Register bind pose operators
     bind_pose.register()
+    from .tools import rest_pose
+    rest_pose.register()
+    material_order_tools.register()
 
     # Register offset-bone operators
     offset_bones.register()
@@ -1354,6 +1341,10 @@ def register():
     bpy.utils.register_class(history.LOL_OT_ClearHistory)
     bpy.utils.register_class(texture_ops.LOL_OT_ReloadTextures)
     
+    # Operators remain available; panel visibility follows saved preferences.
+    entry = bpy.context.preferences.addons.get(__package__)
+    material_order_tools.sync_panel(entry.preferences if entry else None)
+
     # Check preferences to load Extras
     # We defer this slightly or wrap in try-except because on fresh install prefs might not exist
     try:
@@ -1487,6 +1478,9 @@ def unregister():
     bpy.utils.unregister_class(normals.MESH_OT_flip_normals)
     
     # Unregister bind pose operators
+    from .tools import rest_pose
+    material_order_tools.unregister()
+    rest_pose.unregister()
     bind_pose.unregister()
 
     offset_bones.unregister()

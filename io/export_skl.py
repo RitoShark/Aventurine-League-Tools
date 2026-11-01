@@ -25,6 +25,7 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
     globals = plan.bind_globals(use_visual_pose or has_offset_parent(armature_obj),
                                disable_transforms=disable_transforms,
                                apply_object_transform=apply_object_transform)
+    plan.validate_bind_transforms(globals)
     locals = plan.locals(globals)
     rs = require_ritoshark()
     scale = (1.0 if disable_scaling else import_skl.EXPORT_SCALE) * model_scale

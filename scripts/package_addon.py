@@ -12,6 +12,17 @@ import zipfile
 from release import ROOT, read_version, source_config
 
 
+# Repository/working assets, not part of the installed Blender add-on.
+# Keep this explicit: .gitignore is not a release manifest and runtime icons stay.
+REPOSITORY_ONLY_FILES = {
+    'docs/images/aventurine-wordmark.png',
+    'docs/images/aventurine-wordmark.pptx',
+    'docs/images/wordmark-source.txt',
+    'docs/pose-bind-investigation.md',
+    'docs/yone-export-regression.md',
+}
+
+
 def package(root, output_dir):
     source_config(root)
     desired = json.loads((root / 'rust-build.json').read_text(encoding='utf-8'))
@@ -24,7 +35,8 @@ def package(root, output_dir):
     files = [root / name for name in ('__init__.py', 'LICENSE', 'README.md', 'THIRD_PARTY_LICENSES.md')]
     for directory in ('io', 'ui', 'utils', 'extras', 'tools', 'icons', 'vendor', 'docs'):
         files.extend(p for p in (root / directory).rglob('*') if p.is_file()
-                     and '__pycache__' not in p.parts and p.suffix not in ('.pyc', '.pyo'))
+                     and '__pycache__' not in p.parts and p.suffix not in ('.pyc', '.pyo')
+                     and p.relative_to(root).as_posix() not in REPOSITORY_ONLY_FILES)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f'Aventurine-{version}.zip'
     with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:

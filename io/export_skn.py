@@ -7,7 +7,11 @@ import base64
 import hashlib
 from ..utils.format_data import write_skin
 from . import import_skl
-from . import bone_utils
+from . import bone_utils, skin_normals, material_order
+
+# 32 ranges reproduced whole-model invisibility; Riot assets surveyed top out at 31.
+# This guards export only: larger source SKNs remain importable for repair.
+MAX_SKN_SUBMESHES = 31
 
 def _corner_normals(mesh):
     if hasattr(mesh, 'calc_normals_split'):
@@ -15,6 +19,11 @@ def _corner_normals(mesh):
     if hasattr(mesh, 'corner_normals'):
         return [normal.vector.copy() for normal in mesh.corner_normals]
     return [loop.normal.copy() for loop in mesh.loops]
+
+
+def _export_corner_normals(mesh):
+    stored = skin_normals.preserved(mesh)
+    return stored if stored is not None else _corner_normals(mesh)
 
 
 def clean_blender_name(name):
@@ -27,7 +36,7 @@ def tangent_basis_signature(mesh):
     digest = hashlib.sha256()
     for vertex in mesh.vertices:
         digest.update(struct.pack('<3f', *vertex.co))
-    normals = _corner_normals(mesh)
+    normals = _export_corner_normals(mesh)
     uvs = mesh.uv_layers.active
     for loop in mesh.loops:
         digest.update(struct.pack('<I3f2f', loop.vertex_index, *normals[loop.index],
@@ -81,7 +90,7 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
         mesh.calc_normals_split()
 
     # Transform taking mesh-local coords into the space we export from.
-    #   apply_object_transform: full WORLD space — keeps the armature object's
+    #   apply_object_transform: full WORLD space â€” keeps the armature object's
     #     rotation/scale/position, matching what's seen in Blender and what
     #     export_skl folds into the root bones (kept consistent between the two).
     #   off: ARMATURE-LOCAL (object transform dropped from both sides). When the
@@ -96,7 +105,7 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
     scale = (1.0 if disable_scaling else import_skl.EXPORT_SCALE) * model_scale
 
     # Map vertex groups to SKL bone indices.
-    # Exact name match takes priority — weights painted on "X.001" must reach
+    # Exact name match takes priority â€” weights painted on "X.001" must reach
     # bone "X.001" when it exists, not leak onto native "X".  Cleaning strips
     # numeric suffixes only (.001), never at the first dot (Hand.L stays Hand.L).
     group_to_bone_idx = {}
@@ -135,7 +144,7 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
         return None
 
     # Preserve authored corner normals, splitting vertices at both UV and normal seams.
-    loop_normals = deformed_loop_normals if deformed_loop_normals is not None else _corner_normals(mesh)
+    loop_normals = deformed_loop_normals if deformed_loop_normals is not None else _export_corner_normals(mesh)
     normal_matrix = world_to_armature.to_3x3().inverted_safe().transposed()
     if world_to_armature.to_3x3().determinant() < 0:
         normal_matrix = -normal_matrix
@@ -231,6 +240,7 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
     }
 
 
+@skin_normals.with_export_normals
 def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disable_scaling=False, disable_transforms=False, use_visual_pose=False, apply_object_transform=True, model_scale=1.0, influences=None):
     """Write multiple Blender meshes to a single SKN file with multiple submeshes"""
 
@@ -242,6 +252,8 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
     plan.validate_offset_bind()
     bone_list = plan.bones
     use_visual_pose = use_visual_pose or has_offset_parent(armature_obj)
+    plan.validate_bind_transforms(plan.bind_globals(use_visual_pose,
+        disable_transforms=disable_transforms, apply_object_transform=apply_object_transform))
     # Build bone name to index map, with cleaned names if option enabled
     bone_to_idx = {}
     for i, bone in enumerate(bone_list):
@@ -335,6 +347,7 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
 
                 submesh_info = {
                     'name': data['name'],
+                    'order_name': material_order.material_name(mesh_obj, mat_idx),
                     'vertex_start': total_vertex_count,
                     'vertex_count': len(data['vertices']),
                     'index_start': total_index_count,
@@ -368,6 +381,7 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
 
             submesh_info = {
                 'name': data['name'],
+                'order_name': mesh_obj.name,
                 'vertex_start': total_vertex_count,
                 'vertex_count': len(data['vertices']),
                 'index_start': total_index_count,
@@ -383,19 +397,24 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
     if not submesh_data:
         raise Exception("No geometry found to export")
     
-    # Validate limits (same as Maya plugin)
+    # Validate export limits before writing any data.
     if total_vertex_count > 65535:
         raise Exception(f"Too many vertices: {total_vertex_count}, max allowed: 65535. Reduce mesh complexity or split into multiple files.")
     
-    if len(submesh_data) > 32:
-        raise Exception(f"Too many submeshes/materials: {len(submesh_data)}, max allowed: 32. Reduce number of materials.")
+    if len(submesh_data) > MAX_SKN_SUBMESHES:
+        raise ValueError(
+            f"SKN export has {len(submesh_data)} submeshes/material sections; "
+            f"maximum supported is {MAX_SKN_SUBMESHES}. Files with 32 or more "
+            "sections can be invisible in game. Merge mesh/material sections "
+            "before exporting."
+        )
 
     # SKN vertex influence bytes are indices into a per-mesh bone PALETTE (the
     # SKL "influences" table), NOT raw skeleton bone indices.  The engine reads
     # influences[byte] -> real joint index, so the skeleton may hold up to 32768
     # bones while a single SKN weights up to 256 distinct ones.  Writing the raw
     # joint index (as the old code did) overflows the uint8 the moment any
-    # weighted bone sits past index 255 — even if the mesh only touches a few
+    # weighted bone sits past index 255 â€” even if the mesh only touches a few
     # hundred bones out of a larger rig.  Build the palette from the bones the
     # mesh actually uses, then remap every vertex to compact palette indices.
     #
@@ -419,7 +438,7 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
         raise Exception(
             f"SKN format supports at most 256 bones influencing one mesh, but its "
             f"vertices are weighted to {len(influences)} distinct bones. Reduce the "
-            f"number of bones the mesh is weighted to (only weighted bones count — "
+            f"number of bones the mesh is weighted to (only weighted bones count â€” "
             f"the full skeleton may still exceed this)."
         )
 
@@ -430,6 +449,7 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
             v['inf'] = [joint_to_palette[b] if w > 0 else 0
                         for b, w in zip(v['inf'], v['weight'])]
 
+    submesh_data = material_order.reorder_submeshes(submesh_data, armature_obj, mesh_objects)
     write_skin(filepath, submesh_data, flags=flags, prefix_block=base64.b64decode(prefix, validate=True),
                trailing=base64.b64decode(trailing, validate=True))
 
@@ -439,61 +459,6 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
 def fix_custom_bone_parenting(armature_obj):
     """Compatibility shim: export never mutates a user's bone hierarchy."""
     return []
-
-
-def process_animations_visual(operator, context, skn_filepath, armature_obj,
-                              disable_scaling=False, disable_transforms=False,
-                              clean_names=True, anim_scale=1.0, apply_object_transform=True):
-    """Rebake clips through the same importer/export plan as interactive export."""
-    import shutil
-    import tempfile
-    from pathlib import Path
-    from . import import_anm, export_anm
-    directory = Path(skn_filepath).resolve().parent
-    animations = directory / 'animations'
-    backup = directory / 'Unmodified_anm_backup'
-    if not animations.is_dir():
-        operator.report({'WARNING'}, f'No animations folder found at {animations}')
-        return False
-    if not backup.exists():
-        backup.mkdir()
-        for path in animations.glob('*.anm'):
-            shutil.copy2(path, backup / path.name)
-    paths = sorted(backup.glob('*.anm'))
-    if not paths:
-        operator.report({'WARNING'}, 'No animations to process')
-        return False
-    armature_obj.animation_data_create()
-    original = armature_obj.animation_data.action
-    frame = context.scene.frame_current
-    frame_range = (context.scene.frame_start, context.scene.frame_end)
-    pose = {pb.name: pb.matrix_basis.copy() for pb in armature_obj.pose.bones}
-    try:
-        with tempfile.TemporaryDirectory(prefix='.aventurine-anm-', dir=animations) as staging:
-            for path in paths:
-                action = bpy.data.actions.new('__aventurine_rebake')
-                armature_obj.animation_data.action = action
-                try:
-                    clip = import_anm.read_anm(path)
-                    import_anm.apply_anm(clip, armature_obj)
-                    export_anm.write_anm(Path(staging) / path.name, armature_obj, clip.fps,
-                        disable_scaling=disable_scaling, disable_transforms=disable_transforms,
-                        visual_mode=True, clean_names=clean_names, anim_scale=anim_scale,
-                        apply_object_transform=apply_object_transform)
-                finally:
-                    armature_obj.animation_data.action = None
-                    bpy.data.actions.remove(action)
-            # Do not replace any clip if a conversion failed.
-            for path in paths:
-                os.replace(Path(staging) / path.name, animations / path.name)
-    finally:
-        armature_obj.animation_data.action = original
-        for pb in armature_obj.pose.bones:
-            pb.matrix_basis = pose[pb.name]
-        context.scene.frame_start, context.scene.frame_end = frame_range
-        context.scene.frame_set(frame)
-    operator.report({'INFO'}, f'Processed {len(paths)} animations')
-    return True
 
 
 def save(operator, context, filepath, export_skl_file=True, clean_names=True, target_armature=None, disable_scaling=False, disable_transforms=False, use_visual_pose=False, apply_object_transform=True, model_scale=1.0):
@@ -551,7 +516,7 @@ def save(operator, context, filepath, export_skl_file=True, clean_names=True, ta
             operator.report({'INFO'}, f"Exported matching SKL: {skl_path}")
             
         if any(pb.get('lol_offset_companion_of') for pb in armature_obj.pose.bones):
-            operator.report({'WARNING'}, 'Linked root offsets require updated ANMs. Export animations or use batch conversion; unchanged Riot clips will not move the linked roots.')
+            operator.report({'WARNING'}, 'Linked root constraints need explicitly exported animation tracks; model export does not bake those constraints into ANMs.')
         return {'FINISHED'}
     except Exception as e:
         operator.report({'ERROR'}, f"Failed: {str(e)}")

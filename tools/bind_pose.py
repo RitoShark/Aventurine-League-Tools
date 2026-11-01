@@ -7,7 +7,7 @@ import json
 class POSE_OT_go_to_bind_pose(Operator):
     """Return armature to its saved bind pose"""
     bl_idname = "pose.go_to_bind_pose"
-    bl_label = "Go to Bind Pose"
+    bl_label = "Restore Pose Snapshot"
     bl_options = {'REGISTER', 'UNDO'}
     
     @classmethod
@@ -21,7 +21,7 @@ class POSE_OT_go_to_bind_pose(Operator):
         
         # Check if bind pose data exists
         if "lol_bind_pose" not in armature:
-            self.report({'WARNING'}, "No bind pose saved for this armature. Use 'Set New Bind Pose' first.")
+            self.report({'WARNING'}, "No bind pose saved for this armature. Use 'Save Pose Snapshot' first.")
             return {'CANCELLED'}
         
         # Retrieve the stored bind pose
@@ -51,14 +51,14 @@ class POSE_OT_go_to_bind_pose(Operator):
         # Single update to refresh the view
         context.view_layer.update()
         
-        self.report({'INFO'}, f"Restored bind pose for {armature.name}")
+        self.report({'INFO'}, f"Restored pose snapshot for {armature.name}")
         return {'FINISHED'}
 
 
 class POSE_OT_set_bind_pose(Operator):
-    """Save the current pose as the new bind pose"""
+    """Save pose channels for later recall; does not change Blender rest or skin binding"""
     bl_idname = "pose.set_bind_pose"
-    bl_label = "Set New Bind Pose"
+    bl_label = "Save Pose Snapshot"
     bl_options = {'REGISTER', 'UNDO'}
     
     @classmethod
@@ -84,7 +84,7 @@ class POSE_OT_set_bind_pose(Operator):
         # Save to custom property as JSON
         armature["lol_bind_pose"] = json.dumps(bind_pose_data)
         
-        self.report({'INFO'}, f"Saved current pose as bind pose for {armature.name}")
+        self.report({'INFO'}, f"Saved pose snapshot for {armature.name}")
         return {'FINISHED'}
 
 

@@ -1,0 +1,7 @@
+﻿Aventurine README wordmark
+Created in Microsoft PowerPoint through computer-use MCP on 2026-11-01.
+Icon: original bundled icons/50.png, matching the repository embed's Currency Wars icon.
+Font: Trebuchet MS Bold Italic, chosen from the user's recollection of the Jade wordmark.
+Editable source: aventurine-wordmark.pptx.
+Output: aventurine-wordmark.png, exported from the grouped icon and text using Save as Picture (PNG).
+The slide background is for preview only; the PNG has a transparent background.

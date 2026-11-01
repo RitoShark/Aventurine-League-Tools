@@ -81,7 +81,7 @@ class LOL_PT_MainPanel(Panel):
 
         # Bind Pose section - always visible, enabled only in Pose mode with armature
         box = layout.box()
-        box.label(text="Bind Pose", icon='ARMATURE_DATA')
+        box.label(text="Pose Snapshots", icon='ARMATURE_DATA')
         
         # Check if we're in pose mode with an armature
         in_pose_mode = bool(context.active_object and
@@ -98,19 +98,19 @@ class LOL_PT_MainPanel(Panel):
         
         # Go to Bind Pose button - enabled only in pose mode and if bind pose exists
         row.enabled = in_pose_mode and has_bind_pose
-        row.operator("pose.go_to_bind_pose", text="Go to Bind Pose", icon='RECOVER_LAST')
+        row.operator("pose.go_to_bind_pose", text="Restore Pose Snapshot", icon='RECOVER_LAST')
         
         # Set New Bind Pose button - enabled only in pose mode
         row = box.row(align=True)
         row.scale_y = 1.2
         row.enabled = in_pose_mode
-        row.operator("pose.set_bind_pose", text="Set New Bind Pose", icon='KEYFRAME_HLT')
+        row.operator("pose.set_bind_pose", text="Save Pose Snapshot", icon='KEYFRAME_HLT')
         
         # Show status
         if has_bind_pose:
-            box.label(text="✓ Bind pose saved", icon='CHECKMARK')
+            box.label(text="✓ Pose snapshot saved", icon='CHECKMARK')
         else:
-            box.label(text="No bind pose set", icon='INFO')
+            box.label(text="No pose snapshot saved", icon='INFO')
 
         # Explicit controls for static subtree offsets.
         box = layout.box()

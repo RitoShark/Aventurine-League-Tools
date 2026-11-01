@@ -12,7 +12,12 @@ from test_backend import BackendTests, bpy, rs, packed, import_skn, import_skl, 
 from aventurine.utils import texture_manager
 
 
-class FormatSweepTests(BackendTests):
+from test_rest_pose import RestPoseChecks
+from test_material_order import MaterialOrderChecks
+from test_skin_normals import SkinNormalChecks
+
+
+class FormatSweepTests(SkinNormalChecks, MaterialOrderChecks, RestPoseChecks, BackendTests):
     def test_texture_failures_are_reported_in_blender(self):
         from aventurine.utils import texture_manager
         messages = []
@@ -377,6 +382,108 @@ entries: map[hash,embed] = {
         for point in points:
             self.assertLessEqual(sum((point[a] - bounds[6+a])**2 for a in range(3))**0.5, bounds[9] + 1e-4)
 
+    def test_flat_preview_preserves_export_normals_and_saved_mesh_data(self):
+        from aventurine.io import skin_normals
+        source = self.skin(normals=packed('f', [(0.6, 0, 0.8)] * 3))
+        result, _, obj, arm = self.roundtrip_skin(source)
+        self.assertFalse(obj.data.has_custom_normals)
+        self.assertTrue(all(not p.use_smooth for p in obj.data.polygons))
+        for normal in struct.iter_unpack('<3f', result.normals):
+            self.assertVector(normal, (0.6, 0, 0.8))
+        # Stored data survives .blend serialization, not just this Python session.
+        saved = self.directory / 'stored.blend'
+        bpy.data.libraries.write(str(saved), {obj})
+        with bpy.data.libraries.load(str(saved)) as (available, loaded):
+            loaded.objects = [obj.name]
+        restored = loaded.objects[0]
+        self.assertIsNotNone(skin_normals.preserved(restored.data))
+        self.assertFalse(restored.data.has_custom_normals)
+        for normal in skin_normals.preserved(restored.data):
+            self.assertVector(normal, (0.6, 0.8, 0))
+
+    def test_flat_preview_geometry_edits_and_authored_normals_override_cache(self):
+        from aventurine.io import skin_normals
+        from mathutils import Vector
+        source = self.skin(normals=packed('f', [(0.6, 0, 0.8)] * 3))
+        _, _, obj, arm = self.roundtrip_skin(source)
+        obj.data.vertices[1].co.z += 0.4
+        obj.data.update()
+        self.assertIsNone(skin_normals.preserved(obj.data))
+        actual = export_skn._export_corner_normals(obj.data)
+        expected = export_skn._corner_normals(obj.data)
+        for a, e in zip(actual, expected):
+            self.assertVector(a, e)
+        # Even on unchanged geometry, a user's explicit custom normals win.
+        skin_normals.store(obj.data, [Vector((0.6, 0.8, 0))] * len(obj.data.loops))
+        for poly in obj.data.polygons:
+            poly.use_smooth = True
+        if hasattr(obj.data, 'use_auto_smooth'):
+            obj.data.use_auto_smooth = True
+        obj.data.normals_split_custom_set([(1, 0, 0)] * len(obj.data.loops))
+        self.assertIsNone(skin_normals.preserved(obj.data))
+        out = self.directory / 'authored.skn'
+        export_skn.write_skn_multi(out, [obj], arm)
+        for normal in struct.iter_unpack('<3f', rs.Skn.from_path(str(out)).normals):
+            self.assertVector(normal, (1, 0, 0), places=3)
+
+    def test_flat_preview_visual_export_deforms_normals_and_restores_scene(self):
+        from mathutils import Vector
+        source = self.skin(normals=packed('f', [(0.6, 0, 0.8)] * 3))
+        _, _, obj, arm = self.roundtrip_skin(source)
+        bone = arm.pose.bones['child']
+        bone.rotation_mode = 'XYZ'
+        bone.rotation_euler.y = 0.4
+        bpy.context.scene.frame_set(0)
+        bpy.context.view_layer.update()
+        normal = ((bone.matrix @ bone.bone.matrix_local.inverted()).to_3x3().inverted().transposed()
+                  @ Vector((0.6, 0.8, 0))).normalized()
+        expected = (normal.x, -normal.z, normal.y)
+        original = obj.data
+        original_count = len(bpy.data.meshes)
+        bpy.context.scene.frame_set(7)
+        out = self.directory / 'posed.skn'
+        export_skn.write_skn_multi(out, [obj], arm, use_visual_pose=True)
+        for normal in struct.iter_unpack('<3f', rs.Skn.from_path(str(out)).normals):
+            self.assertVector(normal, expected, places=3)
+        self.assertEqual(obj.data, original)
+        self.assertEqual(len(bpy.data.meshes), original_count)
+        self.assertEqual(bpy.context.scene.frame_current, 7)
+        self.assertFalse(obj.data.has_custom_normals)
+        self.assertTrue(all(not p.use_smooth for p in obj.data.polygons))
+        obj.modifiers.new('topology_change', 'SUBSURF')
+        with self.assertRaisesRegex(ValueError, 'topology-changing'):
+            export_skn.write_skn_multi(out, [obj], arm, use_visual_pose=True)
+        self.assertEqual(obj.data, original)
+        self.assertEqual(len(bpy.data.meshes), original_count)
+        self.assertEqual(bpy.context.scene.frame_current, 7)
+        self.assertFalse(obj.data.has_custom_normals)
+
+    def test_split_material_import_keeps_flat_preview_and_export_normals(self):
+        from aventurine.io import skin_normals
+        path = self.skeleton().with_suffix('.skn')
+        source = self.skin(
+            positions=packed('f', [(0, 0, 0), (100, 0, 0), (0, 100, 0), (200, 0, 0), (300, 0, 0), (200, 100, 0)]),
+            normals=packed('f', [(0.6, 0, 0.8)] * 6), uvs=packed('f', [(0, 0), (1, 0), (0, 1)] * 2),
+            blend_indices=packed('I', [(0, 0, 0, 0)] * 6), blend_weights=packed('f', [(1, 0, 0, 0)] * 6),
+            indices=packed('I', [(0, 1, 2), (3, 4, 5)]),
+            submeshes=[rs.Submesh('one', 0, 3, 0, 3), rs.Submesh('two', 3, 3, 3, 3)])
+        source.to_path(str(path))
+        messages = []
+        operator = types.SimpleNamespace(report=lambda level, msg: messages.append(msg))
+        result = import_skn.load(operator, bpy.context, str(path), split_by_material=True, auto_load_textures=False)
+        self.assertEqual(result, {'FINISHED'}, messages)
+        meshes = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH']
+        self.assertEqual(len(meshes), 2)
+        for obj in meshes:
+            self.assertIsNotNone(skin_normals.preserved(obj.data))
+            self.assertFalse(obj.data.has_custom_normals)
+            self.assertTrue(all(not p.use_smooth for p in obj.data.polygons))
+        arm = next(obj for obj in bpy.context.scene.objects if obj.type == 'ARMATURE')
+        out = self.directory / 'split.skn'
+        export_skn.write_skn_multi(out, meshes, arm)
+        for normal in struct.iter_unpack('<3f', rs.Skn.from_path(str(out)).normals):
+            self.assertVector(normal, (0.6, 0, 0.8))
+
     def test_skeleton_metadata_roundtrip(self):
         path = self.skeleton()
         joint = rs.Joint('root', 0, -1, 5.5, (0, 0, 0), (1, 1, 1), (0, 0, 0, 1),
@@ -616,23 +723,191 @@ Faces= 2
         self.assertGreater(abs(result.joints[2].local_translation[0]), 30)
         self.assertIsNone(arm.pose.bones['root'].parent)
 
-    def test_inserted_parent_keeps_stock_translation_and_scale(self):
+    def test_inserted_parent_matches_maya_serialized_hierarchy(self):
+        from mathutils import Matrix, Quaternion, Vector
         from aventurine.io import import_anm
+        from aventurine.io.skeleton import ExportPlan
         arm = self._bone_rig()
         clip = self._bone_clip(arm)
-        bpy.context.scene.frame_set(3)
-        before = arm.pose.bones['child'].matrix.copy()
         self._add_joint(arm, 'helper')
         bpy.ops.object.mode_set(mode='EDIT')
         arm.data.edit_bones['child'].parent = arm.data.edit_bones['helper']
         bpy.ops.object.mode_set(mode='OBJECT')
+        path = self.directory / 'helper.skl'
+        export_skl.write_skl(path, arm)
+        skl = rs.Skl.from_path(str(path))
+        helper = next(j for j in skl.joints if j.name == 'helper')
+        x, y, z, w = helper.local_rotation
+        helper_local = Matrix.LocRotScale(Vector(helper.local_translation) * .01,
+                                          Quaternion((w, x, y, z)), Vector(helper.local_scale))
         arm.animation_data.action = bpy.data.actions.new('reimport')
         import_anm.apply_anm(clip, arm)
         bpy.context.scene.frame_set(3)
-        after = arm.pose.bones['child'].matrix
-        for actual, expected in zip(after, before):
-            self.assertVector(actual, expected, places=4)
-        self.assertVector(arm.pose.bones['child'].scale, (1.2,)*3)
+        # Maya verification: an untracked helper contributes its actual bind
+        # transform; the child's stock ANM local is not silently compensated.
+        root_anim = Matrix.LocRotScale(Vector((.2, 0, 0)), Quaternion(), Vector((1.2,) * 3))
+        child_anim = Matrix.LocRotScale(Vector((.2, 1, 0)), Quaternion(), Vector((1.2,) * 3))
+        expected = root_anim @ helper_local @ child_anim
+        actual = ExportPlan(arm).globals(pose=True)['child']
+        for row, target in zip(actual, expected):
+            self.assertVector(row, target, places=4)
+        self.assertVector(arm.pose.bones['child'].scale, (1.2,) * 3)
+
+    def test_blender_apply_pose_as_rest_preserves_stock_animation_and_skinning(self):
+        from mathutils import Matrix, Quaternion, Vector
+        from aventurine.io import import_anm
+        from aventurine.io.skeleton import ExportPlan, P
+        from aventurine.utils.binary_utils import Hash
+        import hashlib
+        def trs(t, r, scale):
+            return Matrix.LocRotScale(Vector(t), Quaternion((r[3], *r[:3])), Vector(scale))
+        for orientation in ('VISUAL', 'NATIVE'):
+            for edit in ('rotate', 'translate', 'scale', 'combined'):
+                with self.subTest(orientation=orientation, edit=edit):
+                    bpy.ops.object.select_all(action='SELECT')
+                    bpy.ops.object.delete(use_global=False)
+                    joints, palette = import_skl.read_skl(self.skeleton())
+                    arm = import_skl.create_armature(joints, bone_orient=orientation)
+                    source = self.skin(blend_indices=packed('I', [(0, 1, 0, 0)] * 3),
+                                       blend_weights=packed('f', [(.5, .5, 0, 0)] * 3))
+                    source_path = self.directory / 'source.skn'
+                    source.to_path(str(source_path))
+                    obj = import_skn.create_mesh(*import_skn.read_skn(source_path), 'skin', arm, joints, palette)
+                    tracks = []
+                    for name, base in [('root', (0, 0, 0)), ('child', (0, 100, 0))]:
+                        frames = []
+                        for i in range(3):
+                            q = Quaternion((0, 0, 1) if name == 'root' else (1, 0, 0), i * .2)
+                            frames.append(rs.AnimFrame(i/30, (q.x, q.y, q.z, q.w),
+                                (base[0] + i*5, base[1] + i*3, base[2]), (1 + i*.05,) * 3))
+                        tracks.append(rs.AnimTrack(Hash.elf(name), frames))
+                    anm_path = self.directory / 'unchanged.anm'
+                    rs.Anm.new(30, tracks).to_path(str(anm_path))
+                    checksum = hashlib.sha256(anm_path.read_bytes()).hexdigest()
+                    bpy.context.view_layer.objects.active = arm
+                    bone = arm.pose.bones['child']
+                    bone.rotation_mode = 'XYZ'
+                    if edit in ('rotate', 'combined'): bone.rotation_euler = (.35, -.2, .15)
+                    if edit in ('translate', 'combined'): bone.location = (.12, -.08, .05)
+                    if edit in ('scale', 'combined'): bone.scale = (1.3,) * 3
+                    bpy.context.view_layer.update()
+                    rest_vertices = [v.co.copy() for v in obj.data.vertices]
+                    bpy.ops.object.mode_set(mode='POSE')
+                    bpy.ops.pose.armature_apply(selected=False)
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    bpy.context.view_layer.update()
+                    for v, original in zip(obj.data.vertices, rest_vertices): self.assertVector(v.co, original)
+                    out = self.directory / 'fitted.skn'
+                    _, _, export_palette = export_skn.write_skn_multi(out, [obj], arm)
+                    export_skl.write_skl(out.with_suffix('.skl'), arm, influences=export_palette)
+                    skl = rs.Skl.from_path(str(out.with_suffix('.skl')))
+                    native_bind = ExportPlan(arm).globals()
+                    import_anm.apply_anm(import_anm.read_anm(anm_path), arm)
+                    # Frame zero remains the actual newly applied Blender rest.
+                    for name, actual in ExportPlan(arm).globals(pose=True).items():
+                        for row, target in zip(actual, native_bind[name]): self.assertVector(row, target, places=4)
+                    source_tracks = {t.joint_hash: t for t in rs.Anm.from_path(str(anm_path)).tracks}
+                    for frame in range(1, 4):
+                        bpy.context.scene.frame_set(frame)
+                        bpy.context.view_layer.update()
+                        globals = {}
+                        by_id = {j.id: j for j in skl.joints}
+                        def joint_global(j):
+                            if j.id not in globals:
+                                pose = source_tracks[j.hash].frames[frame-1]
+                                local = trs(pose.translation, pose.rotation, pose.scale)
+                                globals[j.id] = joint_global(by_id[j.parent_id]) @ local if j.parent_id >= 0 else local
+                            return globals[j.id]
+                        for j in skl.joints:
+                            actual = ExportPlan(arm).globals(pose=True)[j.name]
+                            actual.translation *= 100
+                            for row, target in zip(actual, joint_global(j)): self.assertVector(row, target, places=3)
+                        transforms = {j.name: joint_global(j) @ trs(j.inverse_bind_translation,
+                                        j.inverse_bind_rotation, j.inverse_bind_scale) for j in skl.joints}
+                        evaluated = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+                        mesh = evaluated.to_mesh()
+                        try:
+                            for v in obj.data.vertices:
+                                point = P.inverted() @ v.co * 100
+                                expected = sum((transforms[obj.vertex_groups[g.group].name] @ point * g.weight
+                                                for g in v.groups), Vector((0, 0, 0)))
+                                measured = P.inverted() @ mesh.vertices[v.index].co * 100
+                                self.assertLess((expected - measured).length, .001)
+                        finally: evaluated.to_mesh_clear()
+                    # Normal export is independent of the currently displayed animation frame.
+                    export_skl.write_skl(self.directory / 'later.skl', arm)
+                    later = rs.Skl.from_path(str(self.directory / 'later.skl'))
+                    for a, b in zip(skl.joints, later.joints):
+                        self.assertVector(a.local_translation, b.local_translation)
+                        self.assertVector(a.inverse_bind_rotation, b.inverse_bind_rotation)
+                    self.assertEqual(hashlib.sha256(anm_path.read_bytes()).hexdigest(), checksum)
+
+    def test_valid_nonuniform_anm_remains_importable_after_rest_edit(self):
+        from mathutils import Matrix, Quaternion
+        from aventurine.io import import_anm
+        from aventurine.io.skeleton import ExportPlan
+        from aventurine.utils.binary_utils import Hash
+        path = self.directory / 'oblique.skl'
+        joints = [rs.Joint('root', 0, -1, 2.1, (0,0,0), (1,1,1), (0,0,0,1),
+                           (0,0,0), (1,1,1), (0,0,0,1)),
+                  rs.Joint('child', 1, 0, 2.1, (50,100,20), (1,1,1), (0,0,0,1),
+                           (-50,-100,-20), (1,1,1), (0,0,0,1))]
+        rs.Skl.new(joints, [0,1]).to_path(str(path))
+        imported, _ = import_skl.read_skl(path)
+        arm = import_skl.create_armature(imported, bone_orient='VISUAL')
+        clip_path = self.directory / 'scaled.anm'
+        q = Quaternion((0,0,1), .3)
+        rs.Anm.new(30, [rs.AnimTrack(Hash.elf('root'), [rs.AnimFrame(0,
+            (q.x,q.y,q.z,q.w), (0,0,0), (1.3,.8,1.1))]),
+            rs.AnimTrack(Hash.elf('child'), [rs.AnimFrame(0,
+            (0,0,0,1), (50,100,20), (1,1,1))])]).to_path(str(clip_path))
+        clip = import_anm.read_anm(clip_path)
+        import_anm.apply_anm(clip, arm); bpy.context.scene.frame_set(1)
+        original = ExportPlan(arm).globals(pose=True)
+        arm.animation_data_clear()
+        for pb in arm.pose.bones: pb.matrix_basis = Matrix.Identity(4)
+        arm.pose.bones['child'].rotation_mode = 'XYZ'
+        arm.pose.bones['child'].rotation_euler.y = .4
+        bpy.context.view_layer.objects.active = arm
+        bpy.context.view_layer.update()
+        bpy.ops.object.mode_set(mode='POSE'); bpy.ops.pose.armature_apply(selected=False)
+        bpy.ops.object.mode_set(mode='OBJECT')
+        import_anm.apply_anm(clip, arm); bpy.context.scene.frame_set(1)
+        for name, actual in ExportPlan(arm).globals(pose=True).items():
+            for row, target in zip(actual, original[name]): self.assertVector(row, target, places=4)
+
+    def test_model_export_operator_does_not_touch_adjacent_anms(self):
+        from test_backend import addon
+        source = self.skin()
+        _, _, obj, arm = self.roundtrip_skin(source)
+        bpy.ops.object.select_all(action='DESELECT'); obj.select_set(True)
+        directory = self.directory / 'animations'; directory.mkdir()
+        clip = directory / 'original.anm'; clip.write_bytes(b'untouched source animation')
+        before = (clip.read_bytes(), clip.stat().st_mtime_ns)
+        messages = []
+        operator = types.SimpleNamespace(target_armature_name=arm.name, filepath=str(self.directory / 'model.skn'),
+            export_skl=True, clean_names=True, disable_scaling=False, disable_transforms=False,
+            use_visual_pose=False, apply_object_transform=True, model_scale=1,
+            report=lambda level, text: messages.append(text))
+        self.assertEqual(addon.ExportSKN.execute(operator, bpy.context), {'FINISHED'}, messages)
+        self.assertEqual((clip.read_bytes(), clip.stat().st_mtime_ns), before)
+        self.assertFalse((self.directory / 'Unmodified_anm_backup').exists())
+        self.assertFalse(hasattr(export_skn, 'process_animations_visual'))
+        self.assertNotIn('unmodified_league_armature', addon.ExportSKN.__annotations__)
+
+    def test_unrepresentable_bind_stops_before_overwriting_models(self):
+        from mathutils import Matrix
+        _, _, obj, arm = self.roundtrip_skin(self.skin())
+        arm.matrix_world = Matrix.Rotation(.4, 4, 'Z') @ Matrix.Diagonal((1.3, .8, 1.1, 1))
+        bpy.context.view_layer.update()
+        skn = self.directory / 'keep.skn'; skl = skn.with_suffix('.skl')
+        skn.write_bytes(b'keep skin'); skl.write_bytes(b'keep skeleton')
+        with self.assertRaisesRegex(ValueError, 'shear'):
+            export_skn.write_skn_multi(skn, [obj], arm)
+        with self.assertRaisesRegex(ValueError, 'shear'):
+            export_skl.write_skl(skl, arm)
+        self.assertEqual(skn.read_bytes(), b'keep skin')
+        self.assertEqual(skl.read_bytes(), b'keep skeleton')
 
     def test_explicit_offset_requires_bind_bake_and_keeps_stock_local(self):
         from aventurine.tools.offset_bones import add_offset_parent, apply_offset_bind

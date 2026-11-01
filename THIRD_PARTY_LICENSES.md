@@ -77,3 +77,16 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+
+## Currency Wars material-order icon
+
+`icons/currency_wars_climbing_the_ranks.png` is the unmodified **Climbing the Ranks**
+Investment Strategy (augment) icon from Honkai: Star Rail's Currency Wars mode.
+Game artwork: HoYoverse / its respective rightsholders; not covered by this add-on's code license.
+
+Source: https://honkai-star-rail.fandom.com/wiki/File:Investment_Strategy_Climbing_the_Ranks_Icon.png
+
+Image: https://static.wikia.nocookie.net/houkai-star-rail/images/b/b7/Investment_Strategy_Climbing_the_Ranks_Icon.png/revision/latest?cb=20251216103430
+
+Retrieved 2026-10-26; original 128 x 128 PNG, displayed using Blender's preview icon system.

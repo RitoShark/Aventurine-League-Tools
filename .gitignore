@@ -45,3 +45,40 @@ skin0.txt
 
 # Local validated release packages
 /dist/
+
+# Local investigation notes; durable behavior is documented in docs/guide.md,
+# docs/bone-workflow.md and docs/skn-material-limit.md.
+/docs/pose-bind-investigation.md
+/docs/yone-export-regression.md
+
+# Editable local artwork; keep the README PNG and its provenance in Git.
+/docs/images/aventurine-wordmark.pptx
+
+# Generated test/build output, not the reusable tests/test_*.py source files.
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+/.coverage
+/.coverage.*
+/coverage.xml
+/htmlcov/
+/build/
+/tmp/
+/scratch/
+/test-output/
+/tests/output/
+/tests/artifacts/
+*.log
+*.pyo
+
+# Local game assets and DCC review scenes used by optional/manual tests.
+*.skl
+*.anm
+*.scb
+*.sco
+*.wad
+*.wad.client
+*.blend
+*.blend[0-9]
+*.ma
+*.mb
