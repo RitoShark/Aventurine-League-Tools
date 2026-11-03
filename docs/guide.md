@@ -107,6 +107,12 @@ remain in place. Shared mesh data is copied so unrelated objects are not changed
 or sheared bind transforms are rejected and the transaction restored. Undo/redo includes
 both the meshes and skeleton.
 
+SKN and SKL export dialogs include **Bypass Shear Check**, off by default. If export
+reports shear, this lets you export an approximation of the bone transforms. Mesh
+deformation can change, so check the result in game. Invalid/zero-scale transforms
+and all other export limits remain enforced. This option applies to export only;
+Apply Pose as Rest Pose keeps its validation.
+
 Existing visual-axis approximations for nonuniform animated scale and compressed-animation
 interpolation differences remain separate limitations. See the
 [bound-mesh rest-pose checks](bound-mesh-rest-pose.md) and earlier

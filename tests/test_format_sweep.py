@@ -15,9 +15,10 @@ from aventurine.utils import texture_manager
 from test_rest_pose import RestPoseChecks
 from test_material_order import MaterialOrderChecks
 from test_skin_normals import SkinNormalChecks
+from test_skeleton_import import SkeletonImportChecks
 
 
-class FormatSweepTests(SkinNormalChecks, MaterialOrderChecks, RestPoseChecks, BackendTests):
+class FormatSweepTests(SkeletonImportChecks, SkinNormalChecks, MaterialOrderChecks, RestPoseChecks, BackendTests):
     def test_texture_failures_are_reported_in_blender(self):
         from aventurine.utils import texture_manager
         messages = []
@@ -887,13 +888,84 @@ Faces= 2
         messages = []
         operator = types.SimpleNamespace(target_armature_name=arm.name, filepath=str(self.directory / 'model.skn'),
             export_skl=True, clean_names=True, disable_scaling=False, disable_transforms=False,
-            use_visual_pose=False, apply_object_transform=True, model_scale=1,
+            use_visual_pose=False, apply_object_transform=True, model_scale=1, allow_shear=False,
             report=lambda level, text: messages.append(text))
         self.assertEqual(addon.ExportSKN.execute(operator, bpy.context), {'FINISHED'}, messages)
         self.assertEqual((clip.read_bytes(), clip.stat().st_mtime_ns), before)
         self.assertFalse((self.directory / 'Unmodified_anm_backup').exists())
         self.assertFalse(hasattr(export_skn, 'process_animations_visual'))
         self.assertNotIn('unmodified_league_armature', addon.ExportSKN.__annotations__)
+
+    def test_near_uniform_source_bind_roundtrip(self):
+        # Imported exporters can leave scales a few 1e-5 away from uniform.
+        # An oblique rotation makes the inverse weakly sheared, even untouched.
+        from mathutils import Matrix, Quaternion, Vector
+        specs = [('root', -1, (0, 0, 0), Quaternion(), (1, 1, 1)),
+                 ('elbow', 0, (20, 100, 0),
+                  Quaternion((0, 0, 1), .7) @ Quaternion((0, 1, 0), .4),
+                  (.999967, 1.0, 1.000033)),
+                 ('hand', 1, (30, 0, 0), Quaternion((1, 0, 0), .3), (1, 1, 1))]
+        source_joints, source_globals = [], []
+        for i, (name, parent, t, r, scale) in enumerate(specs):
+            local = Matrix.LocRotScale(Vector(t), r, Vector(scale))
+            global_bind = source_globals[parent] @ local if parent >= 0 else local
+            source_globals.append(global_bind)
+            it, ir, iss = global_bind.inverted().decompose()
+            source_joints.append(rs.Joint(name, i, parent, 2.1, t, scale,
+                (r.x, r.y, r.z, r.w), tuple(it), tuple(iss), (ir.x, ir.y, ir.z, ir.w)))
+        source_path = self.directory / 'precision.skl'
+        rs.Skl.new(source_joints, [1, 2]).to_path(str(source_path))
+        source_skin = self.skin(blend_indices=packed('I', [(0, 1, 0, 0)] * 3),
+                                blend_weights=packed('f', [(.6, .4, 0, 0)] * 3))
+        source_skin.to_path(str(source_path.with_suffix('.skn')))
+        for orientation in ('VISUAL', 'NATIVE'):
+            with self.subTest(orientation=orientation):
+                joints, palette = import_skl.read_skl(source_path)
+                arm = import_skl.create_armature(joints, bone_orient=orientation)
+                obj = import_skn.create_mesh(*import_skn.read_skn(source_path.with_suffix('.skn')),
+                                             'precision', arm, joints, palette)
+                bpy.context.view_layer.update()
+                out = self.directory / (orientation + '.skn')
+                _, count, export_palette = export_skn.write_skn_multi(out, [obj], arm)
+                export_skl.write_skl(out.with_suffix('.skl'), arm, influences=export_palette)
+                result = rs.Skl.from_path(str(out.with_suffix('.skl')))
+                self.assertEqual(count, source_skin.vertex_count)
+                self.assertEqual([j.name for j in result.joints], [j.name for j in source_joints])
+                self.assertEqual([j.parent_id for j in result.joints], [-1, 0, 1])
+                # Compare skinning with identical animation transforms. The
+                # precision allowance must not materially move weighted points.
+                def inverse(j):
+                    x, y, z, w = j.inverse_bind_rotation
+                    return Matrix.LocRotScale(Vector(j.inverse_bind_translation),
+                        Quaternion((w, x, y, z)), Vector(j.inverse_bind_scale))
+                points = [Vector(p) for p in struct.iter_unpack('<3f', source_skin.positions)]
+                for angle in (0, .6, -1.2):
+                    motion = Matrix.Rotation(angle, 4, 'Y')
+                    for point in points:
+                        expected, actual = Vector((0, 0, 0)), Vector((0, 0, 0))
+                        for index, weight in ((1, .6), (2, .4)):
+                            pose = motion @ source_globals[index]
+                            expected += (pose @ inverse(source_joints[index]) @ point) * weight
+                            actual += (pose @ inverse(result.joints[index]) @ point) * weight
+                        self.assertLess((expected - actual).length, .001)
+
+    def test_bind_precision_allowance_still_rejects_shear_and_invalid_transforms(self):
+        from mathutils import Matrix
+        from aventurine.io.skeleton import decompose_trs
+        for scale in (1, 100):
+            with self.subTest(scale=scale):
+                matrix = Matrix.Diagonal((scale, scale, scale, 1))
+                matrix[0][1] = .001 * scale
+                # Translation must not inflate the allowed linear error.
+                matrix.translation = (1e6, -1e6, 1e6)
+                with self.assertRaisesRegex(ValueError, 'shear'):
+                    decompose_trs(matrix, 'test bind')
+        for invalid in (0.0, float('nan'), float('inf')):
+            with self.subTest(invalid=invalid):
+                matrix = Matrix.Identity(4)
+                matrix[0][0] = invalid
+                with self.assertRaises(ValueError):
+                    decompose_trs(matrix, 'test bind')
 
     def test_unrepresentable_bind_stops_before_overwriting_models(self):
         from mathutils import Matrix
@@ -906,6 +978,89 @@ Faces= 2
             export_skn.write_skn_multi(skn, [obj], arm)
         with self.assertRaisesRegex(ValueError, 'shear'):
             export_skl.write_skl(skl, arm)
+        self.assertEqual(skn.read_bytes(), b'keep skin')
+        self.assertEqual(skl.read_bytes(), b'keep skeleton')
+
+    def test_export_operators_allow_explicit_shear_bypass(self):
+        from mathutils import Matrix
+        from test_backend import addon
+        from aventurine.io.skeleton import ExportPlan
+        _, _, obj, arm = self.roundtrip_skin(self.skin())
+        arm.matrix_world = Matrix.Rotation(.4, 4, 'Z') @ Matrix.Diagonal((1.3, .8, 1.1, 1))
+        bpy.context.view_layer.update()
+        bpy.ops.object.select_all(action='DESELECT')
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        skn = self.directory / 'bypass.skn'
+        skl = skn.with_suffix('.skl')
+        skn.write_bytes(b'keep skin')
+        skl.write_bytes(b'keep skeleton')
+        anm = self.directory / 'unchanged.anm'
+        anm.write_bytes(b'keep animation')
+        registered = []
+        try:
+            for cls, op in ((addon.ExportSKN, bpy.ops.export_scene.skn),
+                            (addon.ExportSKL, bpy.ops.export_scene.skl)):
+                bpy.utils.register_class(cls)
+                registered.append(cls)
+                self.assertFalse(op.get_rna_type().properties['allow_shear'].default)
+            # Both dialogs remain strict when the checkbox is not enabled.
+            with self.assertRaisesRegex(RuntimeError, 'Bypass Shear Check'):
+                bpy.ops.export_scene.skn(filepath=str(skn), target_armature_name=arm.name)
+            with self.assertRaisesRegex(RuntimeError, 'Bypass Shear Check'):
+                bpy.ops.export_scene.skl(filepath=str(skl), target_armature_name=arm.name)
+            self.assertEqual(skn.read_bytes(), b'keep skin')
+            self.assertEqual(skl.read_bytes(), b'keep skeleton')
+            # The SKN checkbox must also reach the paired SKL writer.
+            self.assertEqual(bpy.ops.export_scene.skn(filepath=str(skn), export_skl=True,
+                target_armature_name=arm.name, allow_shear=True), {'FINISHED'})
+            self.assertEqual(rs.Skn.from_path(str(skn)).vertex_count, 3)
+            paired = rs.Skl.from_path(str(skl))
+            self.assertEqual([j.name for j in paired.joints], ['root', 'child'])
+            standalone = self.directory / 'standalone.skl'
+            self.assertEqual(bpy.ops.export_scene.skl(filepath=str(standalone),
+                target_armature_name=arm.name, allow_shear=True), {'FINISHED'})
+            self.assertEqual(standalone.read_bytes(), skl.read_bytes())
+            # SKN-only export accepts the same override and preserves its SKL.
+            before = skl.read_bytes()
+            self.assertEqual(bpy.ops.export_scene.skn(filepath=str(skn), export_skl=False,
+                target_armature_name=arm.name, allow_shear=True), {'FINISHED'})
+            self.assertEqual(skl.read_bytes(), before)
+            # Confirm this uses the normal TRS approximation, not an identity
+            # transform or discarded bone. The scene itself must stay untouched.
+            plan = ExportPlan(arm)
+            for joint in paired.joints:
+                t, r, scale = plan.bind_globals()[joint.name].inverted().decompose()
+                self.assertVector(joint.inverse_bind_translation, t * 100, places=4)
+                self.assertVector(joint.inverse_bind_scale, scale)
+                self.assertVector(joint.inverse_bind_rotation, (r.x, r.y, r.z, r.w))
+            self.assertEqual(anm.read_bytes(), b'keep animation')
+            with self.assertRaisesRegex(ValueError, 'shear'):
+                export_skl.write_skl(self.directory / 'strict-again.skl', arm)
+        finally:
+            for cls in reversed(registered):
+                bpy.utils.unregister_class(cls)
+
+    def test_shear_bypass_still_rejects_invalid_bind_transforms(self):
+        from mathutils import Matrix
+        from aventurine.io.skeleton import decompose_trs
+        for invalid in (0.0, float('nan'), float('inf')):
+            matrix = Matrix.Identity(4)
+            matrix[0][0] = invalid
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    decompose_trs(matrix, 'invalid bind', allow_shear=True)
+        _, _, obj, arm = self.roundtrip_skin(self.skin())
+        arm.matrix_world = Matrix.Diagonal((0, 1, 1, 1))
+        bpy.context.view_layer.update()
+        skn = self.directory / 'keep.skn'
+        skl = skn.with_suffix('.skl')
+        skn.write_bytes(b'keep skin')
+        skl.write_bytes(b'keep skeleton')
+        with self.assertRaises(ValueError):
+            export_skn.write_skn_multi(skn, [obj], arm, allow_shear=True)
+        with self.assertRaises(ValueError):
+            export_skl.write_skl(skl, arm, allow_shear=True)
         self.assertEqual(skn.read_bytes(), b'keep skin')
         self.assertEqual(skl.read_bytes(), b'keep skeleton')
 

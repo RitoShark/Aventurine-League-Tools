@@ -35,6 +35,10 @@ class SKLJoints(list):
 def read_skl(filepath):
     skeleton = require_ritoshark().Skl.from_path(str(filepath))
     source = skeleton.joints
+    for index, joint in enumerate(source):
+        if not joint.name:
+            raise ValueError(f'SKL joint {joint.id} (record {index}) has an empty name that '
+                             'could not be recovered. Check the source SKL in its original exporter.')
     index_by_id = {joint.id: index for index, joint in enumerate(source)}
     if len(index_by_id) != len(source) or len({joint.name for joint in source}) != len(source):
         raise ValueError('SKL contains duplicate joint IDs or names')
@@ -110,16 +114,54 @@ def create_armature(joints, name="Armature", bone_orient='VISUAL'):
     for i, joint in enumerate(joints):
         joint.global_pos = compute_mat(i).to_translation()
     
-    armature_data = bpy.data.armatures.new(name)
-    armature_obj = bpy.data.objects.new(name, armature_data)
-    armature_obj['lol_skl_name'] = getattr(joints, 'name', '')
-    armature_obj['lol_skl_asset'] = getattr(joints, 'asset', '')
-    armature_obj['lol_skl_flags'] = getattr(joints, 'flags', 0)
-    if hasattr(joints, 'influences'):
-        armature_obj['lol_skin_palette'] = json.dumps([{'native': i} for i in joints.influences])
-    bpy.context.scene.collection.objects.link(armature_obj)
-    bpy.context.view_layer.objects.active = armature_obj
-    
+    context = bpy.context
+    previous_active = context.view_layer.objects.active
+    previous_mode = previous_active.mode if previous_active else 'OBJECT'
+    previous_selection = list(context.selected_objects)
+    armature_data = armature_obj = None
+    completed = False
+    try:
+        # Isolate the new armature from any objects already being edited.
+        if previous_active and previous_mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        armature_data = bpy.data.armatures.new(name)
+        armature_obj = bpy.data.objects.new(name, armature_data)
+        armature_obj['lol_skl_name'] = getattr(joints, 'name', '')
+        armature_obj['lol_skl_asset'] = getattr(joints, 'asset', '')
+        armature_obj['lol_skl_flags'] = getattr(joints, 'flags', 0)
+        if hasattr(joints, 'influences'):
+            armature_obj['lol_skin_palette'] = json.dumps([{'native': i} for i in joints.influences])
+        context.scene.collection.objects.link(armature_obj)
+        context.view_layer.objects.active = armature_obj
+        armature_obj.select_set(True)
+        _populate_armature(joints, mats, armature_obj, bone_orient)
+        completed = True
+        return armature_obj
+    finally:
+        if not completed:
+            try:
+                if armature_obj is not None and armature_obj.mode != 'OBJECT':
+                    context.view_layer.objects.active = armature_obj
+                    bpy.ops.object.mode_set(mode='OBJECT')
+            finally:
+                if armature_obj is not None:
+                    bpy.data.objects.remove(armature_obj, do_unlink=True)
+                if armature_data is not None and armature_data.users == 0:
+                    bpy.data.armatures.remove(armature_data)
+                for obj in context.selected_objects:
+                    obj.select_set(False)
+                for obj in previous_selection:
+                    obj.select_set(True)
+                context.view_layer.objects.active = previous_active
+                if previous_active and previous_mode != 'OBJECT':
+                    bpy.ops.object.mode_set(mode=previous_mode)
+
+
+def _populate_armature(joints, mats, armature_obj, bone_orient):
+    """Build the new rig; create_armature owns rollback of all scene changes."""
+    armature_data = armature_obj.data
     bpy.ops.object.mode_set(mode='EDIT')
 
     if bone_orient == 'NATIVE':

@@ -89,8 +89,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $wheel = Get-ChildItem -LiteralPath wheels -Filter '*win_amd64.whl'
           python -m pip install --force-reinstall $wheel.FullName
-      - name: Test Rust mesh parsing and writing
-        run: cargo test --release --locked --manifest-path library/Cargo.toml -p rs_mesh
+      - name: Test Rust mesh and animation formats
+        run: cargo test --release --locked --manifest-path library/Cargo.toml -p rs_mesh -p rs_anim
       - name: Test Rust Python bindings
         run: python -m pytest library/crates/rs_python/tests -q -p no:cacheprovider
       - name: Test Blender imports and exports

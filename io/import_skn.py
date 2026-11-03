@@ -185,7 +185,7 @@ def load(operator, context, filepath, load_skl_file=True, split_by_material=Fals
                     joints, influences = import_skl.read_skl(skl_path)
                     armature_obj = import_skl.create_armature(joints, bone_orient=bone_orient)
                 except Exception as e:
-                    operator.report({'WARNING'}, f'SKL load failed: {str(e)}')
+                    raise ValueError(f'Could not import matching SKL {os.path.basename(skl_path)!r}: {e}') from e
         
         name = os.path.splitext(os.path.basename(filepath))[0]
         mesh_obj = create_mesh(indices, vertices, submeshes, name, armature_obj, joints, influences)

@@ -13,8 +13,14 @@ def stored_matrix(pb, key):
     return Matrix([values[i:i+4] for i in range(0, 16, 4)]) if values is not None and len(values) == 16 else None
 
 
-def decompose_trs(matrix, label):
-    """Reject shear/singular transforms instead of silently approximating them."""
+# Bind data from existing exporters can contain near-uniform scale noise.
+# Allow 0.01% linear reconstruction error (with a unit-scale floor); translation
+# is deliberately excluded so a distant rig cannot hide meaningful shear.
+BIND_TRS_TOLERANCE = 1e-4
+
+
+def decompose_trs(matrix, label, allow_shear=False):
+    """Allow bind precision noise while rejecting meaningful shear/singularities."""
     import math
     t, r, s = matrix.decompose()
     if any(not math.isfinite(v) for row in matrix for v in row) or min(abs(v) for v in s) < 1e-8:
@@ -22,9 +28,11 @@ def decompose_trs(matrix, label):
     rebuilt = Matrix.LocRotScale(t, r, s)
     magnitude = max(1.0, max(abs(matrix[row][col]) for row in range(3) for col in range(3)))
     error = max(abs(matrix[row][col] - rebuilt[row][col]) for row in range(3) for col in range(3))
-    if error > 2e-5 * magnitude:
+    if not allow_shear and error > BIND_TRS_TOLERANCE * magnitude:
         raise ValueError(f'{label}: transform contains shear that SKL/ANM TRS cannot preserve. '
-                         'Use uniform bone/object scale or bake the stretch into the mesh.')
+                         'Use uniform bone/object scale or bake the stretch into the mesh. '
+                         'To export an approximation, enable Bypass Shear Check in the export options '
+                         '(may change deformation).')
     return t, r, s
 
 
@@ -93,15 +101,15 @@ class ExportPlan:
                     raise ValueError(f'Offset parent {pb.name!r} has no neutral export frame')
             self.corrections[pb.name] = k
 
-    def validate_bind_transforms(self, globals):
+    def validate_bind_transforms(self, globals, allow_shear=False):
         locals = self.locals(globals)
         for pb in self.bones:
-            decompose_trs(locals[pb.name], f'{pb.name}: local bind')
+            decompose_trs(locals[pb.name], f'{pb.name}: local bind', allow_shear=allow_shear)
             try:
                 inverse = globals[pb.name].inverted()
             except ValueError as error:
                 raise ValueError(f'{pb.name}: singular bind transform') from error
-            decompose_trs(inverse, f'{pb.name}: inverse bind')
+            decompose_trs(inverse, f'{pb.name}: inverse bind', allow_shear=allow_shear)
 
     def skin_palette(self):
         """Resolve slots of the imported or most recently exported SKN/SKL pair.

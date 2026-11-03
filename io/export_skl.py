@@ -6,7 +6,7 @@ from . import import_skl
 from . import bone_utils
 
 def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=False, use_visual_pose=False,
-              clean_names=True, apply_object_transform=True, model_scale=1.0, influences=None):
+              clean_names=True, apply_object_transform=True, model_scale=1.0, influences=None, allow_shear=False):
     """Write Blender armature to SKL file (Version 0)
 
     influences: the bone palette the paired SKN's vertex bytes index into, as a
@@ -25,7 +25,7 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
     globals = plan.bind_globals(use_visual_pose or has_offset_parent(armature_obj),
                                disable_transforms=disable_transforms,
                                apply_object_transform=apply_object_transform)
-    plan.validate_bind_transforms(globals)
+    plan.validate_bind_transforms(globals, allow_shear=allow_shear)
     locals = plan.locals(globals)
     rs = require_ritoshark()
     scale = (1.0 if disable_scaling else import_skl.EXPORT_SCALE) * model_scale
@@ -49,7 +49,7 @@ def write_skl(filepath, armature_obj, disable_scaling=False, disable_transforms=
 
     return True
 
-def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False, use_visual_pose=False, clean_names=True, apply_object_transform=True, model_scale=1.0):
+def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False, use_visual_pose=False, clean_names=True, apply_object_transform=True, model_scale=1.0, allow_shear=False):
     armature_obj = target_armature
 
     if not armature_obj:
@@ -64,8 +64,11 @@ def save(operator, context, filepath, target_armature=None, disable_scaling=Fals
 
     try:
         write_skl(filepath, armature_obj, disable_scaling, disable_transforms, use_visual_pose,
-                  clean_names=clean_names, apply_object_transform=apply_object_transform, model_scale=model_scale)
+                  clean_names=clean_names, apply_object_transform=apply_object_transform, model_scale=model_scale,
+                  allow_shear=allow_shear)
         operator.report({'INFO'}, f"Exported SKL: {filepath}")
+        if allow_shear:
+            operator.report({'WARNING'}, 'Shear check bypassed; exported bones may deform differently. Verify the model in game.')
         return {'FINISHED'}
     except Exception as e:
         operator.report({'ERROR'}, f"Failed: {str(e)}")

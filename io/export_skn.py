@@ -241,7 +241,7 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
 
 
 @skin_normals.with_export_normals
-def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disable_scaling=False, disable_transforms=False, use_visual_pose=False, apply_object_transform=True, model_scale=1.0, influences=None):
+def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disable_scaling=False, disable_transforms=False, use_visual_pose=False, apply_object_transform=True, model_scale=1.0, influences=None, allow_shear=False):
     """Write multiple Blender meshes to a single SKN file with multiple submeshes"""
 
     if not armature_obj:
@@ -253,7 +253,8 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
     bone_list = plan.bones
     use_visual_pose = use_visual_pose or has_offset_parent(armature_obj)
     plan.validate_bind_transforms(plan.bind_globals(use_visual_pose,
-        disable_transforms=disable_transforms, apply_object_transform=apply_object_transform))
+        disable_transforms=disable_transforms, apply_object_transform=apply_object_transform),
+        allow_shear=allow_shear)
     # Build bone name to index map, with cleaned names if option enabled
     bone_to_idx = {}
     for i, bone in enumerate(bone_list):
@@ -461,7 +462,7 @@ def fix_custom_bone_parenting(armature_obj):
     return []
 
 
-def save(operator, context, filepath, export_skl_file=True, clean_names=True, target_armature=None, disable_scaling=False, disable_transforms=False, use_visual_pose=False, apply_object_transform=True, model_scale=1.0):
+def save(operator, context, filepath, export_skl_file=True, clean_names=True, target_armature=None, disable_scaling=False, disable_transforms=False, use_visual_pose=False, apply_object_transform=True, model_scale=1.0, allow_shear=False):
     armature_obj = target_armature
     mesh_objects = []
     
@@ -504,7 +505,7 @@ def save(operator, context, filepath, export_skl_file=True, clean_names=True, ta
     try:
         from .skeleton import ExportPlan
         palette = None if export_skl_file else ExportPlan(armature_obj, clean_names).skin_palette()
-        submesh_count, vertex_count, skn_influences = write_skn_multi(filepath, mesh_objects, armature_obj, clean_names, disable_scaling, disable_transforms, use_visual_pose, apply_object_transform=apply_object_transform, model_scale=model_scale, influences=palette)
+        submesh_count, vertex_count, skn_influences = write_skn_multi(filepath, mesh_objects, armature_obj, clean_names, disable_scaling, disable_transforms, use_visual_pose, apply_object_transform=apply_object_transform, model_scale=model_scale, influences=palette, allow_shear=allow_shear)
         operator.report({'INFO'}, f"Exported SKN: {submesh_count} submeshes, {vertex_count} vertices, {len(skn_influences)} bone influences")
 
         if export_skl_file and armature_obj:
@@ -512,9 +513,11 @@ def save(operator, context, filepath, export_skl_file=True, clean_names=True, ta
             from . import export_skl
             export_skl.write_skl(skl_path, armature_obj, disable_scaling, disable_transforms, use_visual_pose,
                                  clean_names=clean_names, apply_object_transform=apply_object_transform, model_scale=model_scale,
-                                 influences=skn_influences)
+                                 influences=skn_influences, allow_shear=allow_shear)
             operator.report({'INFO'}, f"Exported matching SKL: {skl_path}")
             
+        if allow_shear:
+            operator.report({'WARNING'}, 'Shear check bypassed; exported bones may deform differently. Verify the model in game.')
         if any(pb.get('lol_offset_companion_of') for pb in armature_obj.pose.bones):
             operator.report({'WARNING'}, 'Linked root constraints need explicitly exported animation tracks; model export does not bake those constraints into ANMs.')
         return {'FINISHED'}

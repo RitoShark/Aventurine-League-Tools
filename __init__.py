@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (4, 1, 0),
+    "version": (4, 1, 1),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -815,6 +815,13 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
         default=False
     )
 
+    allow_shear: BoolProperty(
+        name="Bypass Shear Check",
+        description="Allow approximate export of sheared bind transforms. This may change mesh "
+                    "deformation; verify the result in game. Invalid or zero-scale transforms remain blocked",
+        default=False
+    )
+
     target_armature_name: StringProperty(options={'HIDDEN'})
 
     def draw(self, context):
@@ -828,6 +835,11 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
         layout.prop(self, "disable_scaling")
         layout.prop(self, "disable_transforms")
         layout.prop(self, "use_visual_pose")
+        layout.prop(self, "allow_shear")
+        if self.allow_shear:
+            warning = layout.box()
+            warning.alert = True
+            warning.label(text="May change mesh deformation.", icon='ERROR')
 
     def invoke(self, context, event):
         # Try to get stored path from mesh or armature
@@ -872,6 +884,7 @@ class ExportSKN(bpy.types.Operator, ExportHelper):
             use_visual_pose=self.use_visual_pose,
             apply_object_transform=self.apply_object_transform,
             model_scale=self.model_scale,
+            allow_shear=self.allow_shear,
         )
 
         # Update the stored SKN path so the next export dialog opens at the
@@ -946,6 +959,13 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
         default=False
     )
 
+    allow_shear: BoolProperty(
+        name="Bypass Shear Check",
+        description="Allow approximate export of sheared bind transforms. This may change mesh "
+                    "deformation; verify the result in game. Invalid or zero-scale transforms remain blocked",
+        default=False
+    )
+
     target_armature_name: StringProperty(options={'HIDDEN'})
 
     def draw(self, context):
@@ -958,6 +978,11 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
         layout.prop(self, "disable_scaling")
         layout.prop(self, "disable_transforms")
         layout.prop(self, "use_visual_pose")
+        layout.prop(self, "allow_shear")
+        if self.allow_shear:
+            warning = layout.box()
+            warning.alert = True
+            warning.label(text="May change mesh deformation.", icon='ERROR')
 
     def invoke(self, context, event):
         # Try to get stored path from armature
@@ -988,7 +1013,7 @@ class ExportSKL(bpy.types.Operator, ExportHelper):
     def execute(self, context):
         from .io import export_skl
         target_armature = context.scene.objects.get(self.target_armature_name) if self.target_armature_name else None
-        return export_skl.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms, use_visual_pose=self.use_visual_pose, clean_names=self.clean_names, apply_object_transform=self.apply_object_transform, model_scale=self.model_scale)
+        return export_skl.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms, use_visual_pose=self.use_visual_pose, clean_names=self.clean_names, apply_object_transform=self.apply_object_transform, model_scale=self.model_scale, allow_shear=self.allow_shear)
 
 # Export operator for ANM
 class ExportANM(bpy.types.Operator, ExportHelper):

@@ -119,7 +119,7 @@ def main():
         maturin = tools / 'bin/maturin.exe'
         run(maturin, 'build', '--release', '--locked', '--manifest-path', source / 'crates/rs_python/Cargo.toml',
             '--interpreter', sys.executable, '--out', temp / 'wheels', env=env)
-        run('cargo', 'test', '--release', '--locked', '--manifest-path', source / 'Cargo.toml', '-p', 'rs_mesh', env=env)
+        run('cargo', 'test', '--release', '--locked', '--manifest-path', source / 'Cargo.toml', '-p', 'rs_mesh', '-p', 'rs_anim', env=env)
         wheel, = (temp / 'wheels').glob('*-abi3-win_amd64.whl')
         metadata = vendor(wheel, candidate / 'vendor', commit, patch)
         for key in ('source_patch', 'source_patch_sha256'):
