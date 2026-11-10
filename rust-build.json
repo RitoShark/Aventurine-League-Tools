@@ -1,6 +1,4 @@
 {
-  "source_commit": "ac76f029b60ba4f80abeb5b5a547cd74596a8146",
-  "rust_toolchain": "1.98.1",
-  "source_patch": "ritoshark-source.patch",
-  "source_patch_sha256": "e1575c641da77064675b4516392866afd90106cb748d96a0376f0c835cf3cda8"
+  "source_commit": "10ab6d9dda26b96a0566a14a21733eff3868a999",
+  "rust_toolchain": "1.98.1"
 }

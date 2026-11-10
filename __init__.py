@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aventurine: League Tools",
     "author": "Bud and Frog",
-    "version": (4, 1, 1),
+    "version": (4, 2, 0),
     "blender": (4, 0, 0),
     "location": "File > Import-Export",
     "description": "Plugin for working with League of Legends 3D assets natively",
@@ -1026,6 +1026,17 @@ class ExportANM(bpy.types.Operator, ExportHelper):
     filename_ext = ".anm"
     filter_glob: StringProperty(default="*.anm", options={'HIDDEN'})
 
+    export_format: EnumProperty(
+        name="Format",
+        description="Animation format to write; fallbacks preserve motion when a format cannot represent it",
+        items=[
+            ('v5', "V5", "Compact frames with packed rotations. Recommended for most clips; uses V4 if needed"),
+            ('canm', "CANM", "Adaptive compression. Often smaller, but slower to export; uses V5, then V4 if needed"),
+            ('v4', "V4", "Uncompressed frames with full-precision rotations. Usually larger files"),
+        ],
+        default='v5',
+    )
+
     check_existing: BoolProperty(
         name="Confirm Overwrite",
         description="Prompt before overwriting existing files",
@@ -1130,6 +1141,15 @@ class ExportANM(bpy.types.Operator, ExportHelper):
         layout = self.layout
         layout.use_property_split = False
         layout.use_property_decorate = False
+        box = layout.box()
+        box.prop(self, "export_format")
+        descriptions = {
+            'v5': ("Compact frames with packed rotations.", "Recommended; uses V4 if needed."),
+            'canm': ("Adaptive compression; often smaller.", "Slower export; uses V5, then V4 if needed."),
+            'v4': ("Full-precision, uncompressed frames.", "Usually larger files."),
+        }
+        for line in descriptions[self.export_format]:
+            box.label(text=line)
         layout.prop(self, "clean_names")
         layout.prop(self, "apply_object_transform")
         layout.prop(self, "anim_scale")
@@ -1171,7 +1191,7 @@ class ExportANM(bpy.types.Operator, ExportHelper):
         from .io import export_anm
         target_armature = context.scene.objects.get(self.target_armature_name) if self.target_armature_name else None
         if not self.batch_export_all_actions:
-            return export_anm.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms, flip=self.flip, use_scene_range=self.use_scene_range, clean_names=self.clean_names, anim_scale=self.anim_scale, apply_object_transform=self.apply_object_transform)
+            return export_anm.save(self, context, self.filepath, target_armature=target_armature, disable_scaling=self.disable_scaling, disable_transforms=self.disable_transforms, flip=self.flip, use_scene_range=self.use_scene_range, clean_names=self.clean_names, anim_scale=self.anim_scale, apply_object_transform=self.apply_object_transform, export_format=self.export_format)
 
         if not target_armature:
             target_armature = context.active_object if context.active_object and context.active_object.type == 'ARMATURE' else None
@@ -1197,10 +1217,14 @@ class ExportANM(bpy.types.Operator, ExportHelper):
         if not target_armature.animation_data:
             target_armature.animation_data_create()
         original_action = target_armature.animation_data.action
+        original_frame = context.scene.frame_current
+        original_subframe = context.scene.frame_subframe
 
-        fps = context.scene.render.fps
+        fps = context.scene.render.fps / context.scene.render.fps_base
         exported_count = 0
         failed = []
+        formats = {}
+        fallback_count = 0
 
         try:
             for action in actions:
@@ -1212,7 +1236,7 @@ class ExportANM(bpy.types.Operator, ExportHelper):
 
                 try:
                     target_armature.animation_data.action = action
-                    export_anm.write_anm(
+                    result = export_anm.write_anm(
                         filepath,
                         target_armature,
                         fps,
@@ -1222,17 +1246,27 @@ class ExportANM(bpy.types.Operator, ExportHelper):
                         clean_names=self.clean_names,
                         anim_scale=self.anim_scale,
                         apply_object_transform=self.apply_object_transform,
+                        export_format=self.export_format,
                     )
                     exported_count += 1
+                    formats[result.format] = formats.get(result.format, 0) + 1
+                    fallback_count += bool(result.fallbacks)
                 except Exception as e:
                     failed.append(f"{action.name} ({str(e)})")
         finally:
             target_armature.animation_data.action = original_action
+            context.scene.frame_set(original_frame, subframe=original_subframe)
 
+        format_summary = ', '.join(f'{count} {format.upper()}' for format, count in sorted(formats.items()))
+        summary = f'Batch export finished: {exported_count}/{len(actions)} exported'
+        if format_summary:
+            summary += f' ({format_summary})'
         if failed:
-            self.report({'WARNING'}, f"Batch export finished: {exported_count}/{len(actions)} exported. Failed: {len(failed)}")
-        else:
-            self.report({'INFO'}, f"Batch export finished: {exported_count} animations exported")
+            summary += f'. Failed: {len(failed)}'
+            print('[Aventurine] Batch export failures: ' + '; '.join(failed))
+        if fallback_count:
+            summary += f'. Format fallback: {fallback_count}; details in console'
+        self.report({'WARNING'} if failed or fallback_count else {'INFO'}, summary)
 
         return {'FINISHED'} if exported_count > 0 else {'CANCELLED'}
 

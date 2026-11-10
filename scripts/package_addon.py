@@ -59,6 +59,7 @@ def smoke(root):
     from Aventurine.utils.backend import require_ritoshark
     rs = require_ritoshark()
     assert hasattr(rs.Skn, 'colors') and hasattr(rs.Skn, 'tangents') and hasattr(rs.Skl, 'flags') and hasattr(rs.Scb, 'trailing') and hasattr(rs.Scb, 'colors')
+    assert hasattr(rs.Anm, 'export') and hasattr(rs, 'AnmExport')
     addon.register()
     addon.unregister()
     print('Packaged add-on registers and loads the Rust extension')

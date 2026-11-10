@@ -8,6 +8,7 @@ __all__ = [
     "AnimFrame",
     "AnimTrack",
     "Anm",
+    "AnmExport",
     "Dds",
     "FormatError",
     "Joint",

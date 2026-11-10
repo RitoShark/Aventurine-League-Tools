@@ -28,7 +28,7 @@ def write_skin(filepath, submeshes, **metadata):
     ).to_path(str(filepath))
 
 
-def write_animation(filepath, fps, joint_data, vectors, rotations):
+def write_animation(filepath, fps, joint_data, vectors, rotations, export_format='v5', skeleton=None):
     rs = require_ritoshark()
     tracks = []
     for joint_hash, samples in sorted(joint_data.items()):
@@ -38,7 +38,13 @@ def write_animation(filepath, fps, joint_data, vectors, rotations):
             frames.append(rs.AnimFrame(index / fps, (q.x, q.y, q.z, q.w),
                                        tuple(vectors[translation]), tuple(vectors[scale])))
         tracks.append(rs.AnimTrack(joint_hash, frames))
-    rs.Anm.new(fps, tracks).to_path(str(filepath))
+    result = rs.Anm.new(fps, tracks).export(export_format, skeleton=skeleton)
+    result.to_path(str(filepath))
+    if result.fallbacks:
+        reasons = '; '.join(f'{format.upper()}: {reason}' for format, reason in result.fallbacks)
+        print(f'[Aventurine] {filepath}: requested {result.requested_format.upper()}, '
+              f'wrote {result.format.upper()}. {reasons}')
+    return result
 
 
 def materials_from_bin(document):

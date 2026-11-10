@@ -16,9 +16,10 @@ from test_rest_pose import RestPoseChecks
 from test_material_order import MaterialOrderChecks
 from test_skin_normals import SkinNormalChecks
 from test_skeleton_import import SkeletonImportChecks
+from test_animation_export import AnimationExportChecks
 
 
-class FormatSweepTests(SkeletonImportChecks, SkinNormalChecks, MaterialOrderChecks, RestPoseChecks, BackendTests):
+class FormatSweepTests(AnimationExportChecks, SkeletonImportChecks, SkinNormalChecks, MaterialOrderChecks, RestPoseChecks, BackendTests):
     def test_texture_failures_are_reported_in_blender(self):
         from aventurine.utils import texture_manager
         messages = []
@@ -1102,7 +1103,8 @@ Faces= 2
         bpy.context.scene.frame_set(3)
         expected = cape.matrix.copy()
         path = self.directory/'cape.anm'
-        export_anm.write_anm(path, arm)
+        # Test exact bone-frame reconstruction independently of rotation packing.
+        export_anm.write_anm(path, arm, export_format='v4')
         clip = import_anm.read_anm(path)
         arm.animation_data.action = bpy.data.actions.new('new')
         cape.location = (9,8,7)
@@ -1149,7 +1151,7 @@ Faces= 2
         apply_offset_bind(arm)
         _, _, palette = export_skn.write_skn_multi(self.directory/'out.skn',[obj],arm)
         export_skl.write_skl(self.directory/'out.skl',arm,influences=palette)
-        export_anm.write_anm(self.directory/'out.anm',arm)
+        export_anm.write_anm(self.directory/'out.anm',arm,export_format='v4')
         skl = rs.Skl.from_path(str(self.directory/'out.skl'))
         anm = rs.Anm.from_path(str(self.directory/'out.anm'))
         skn = rs.Skn.from_path(str(self.directory/'out.skn'))
@@ -1232,7 +1234,7 @@ Faces= 2
             for name,matrix in ExportPlan(arm).globals(pose=True).items():
                 for actual,goal in zip(matrix,expected[frame][name]):self.assertVector(actual,goal,places=5)
         # Full exported clips also round-trip without applying the offset twice.
-        out=self.directory/'linked.anm';export_anm.write_anm(out,arm)
+        out=self.directory/'linked.anm';export_anm.write_anm(out,arm,export_format='v4')
         arm.animation_data.action=bpy.data.actions.new('exported clip')
         import_anm.apply_anm(import_anm.read_anm(out),arm)
         for frame in range(1,4):

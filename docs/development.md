@@ -56,7 +56,7 @@ choice; this does not generate new grids or guarantee in-game compatibility.
 
 The [custom-bone investigation](custom-bone-investigation.md) records the earlier baseline. For current behavior, use [bone workflows](bone-workflow.md) and the [bound-mesh rest-pose checks](bound-mesh-rest-pose.md).
 
-See the [Rust format audit](rust-format-audit.md) for the Maya comparison, field-preservation fixes, validation results and remaining limits. The current bundled extension includes local library changes: `vendor/wheel.json` records the base commit and a source patch with its SHA-256. Rebuild from that base plus the patch, or from the matching local library checkout.
+See the [Rust format audit](rust-format-audit.md) for the Maya comparison, field-preservation fixes, validation results and remaining limits. The bundled extension now uses the published library commit pinned in `rust-build.json`, including mesh metadata preservation and the animation export API. `vendor/wheel.json` records the matching commit and wheel SHA-256; no source patch is currently required.
 
 To record a locally patched build, add `--source-patch path/to/source.patch` to the vendoring command. Run `tests/test_format_sweep.py` in Blender for the expanded integration suite.
 

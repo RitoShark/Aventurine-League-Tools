@@ -44,6 +44,20 @@ The **Load Animations** panel finds an `animations` folder beside the imported s
 
 Use the NLA import/export buttons for multiple clips, or the ANM export dialog's batch action option. Preserve actions you want to keep with Fake User or an NLA strip when replacing an armature's active action.
 
+### Export formats
+
+The ANM export dialog offers three formats, including for batch action export:
+
+- **V5** (default): compact frames with packed rotations; recommended for most clips.
+- **CANM**: adaptive compression, often producing smaller files but taking longer to export.
+- **V4**: uncompressed frames with full-precision rotations, usually producing larger files.
+
+All three use the `.anm` extension. Exports are checked against the sampled motion and
+bone hierarchy. If the selected format cannot meet the motion checks or format limits,
+CANM falls back to V5, then V4; V5 falls back to V4. The export report tells you the
+actual format and warns when a fallback was needed, with details in Blender's console.
+If none succeeds, export fails without replacing an existing file.
+
 ### Retargeting onto another skeleton
 
 1. Import an animation onto its source armature.

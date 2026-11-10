@@ -97,7 +97,7 @@ class BackendTests(unittest.TestCase):
         self.assertVector(imported.tracks[0].poses[1].translation, (1, 2, 3))
         self.assertVector(imported.tracks[0].poses[1].rotation, (0.8, 0, 0, 0.6))
         out = self.directory / 'roundtrip.anm'
-        export_anm.write_anm_from_data(str(out), imported)
+        export_anm.write_anm_from_data(str(out), imported, export_format='v4')
         actual = rs.Anm.from_path(str(out))
         for expected, got in zip(frames, actual.tracks[0].frames):
             self.assertVector(got.translation, expected.translation)

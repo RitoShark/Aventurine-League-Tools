@@ -1,18 +1,46 @@
 import bpy
-import os
 import mathutils
 import math
 from ..utils.binary_utils import Hash
+from ..utils.backend import require_ritoshark
 from ..utils.format_data import write_animation
 from . import import_skl
-from . import bone_utils
 
-def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False, visual_mode=False, use_scene_range=False, clean_names=True, anim_scale=1.0, apply_object_transform=True):
+
+def _animation_skeleton(plan, joint_data, vectors, rotations):
+    """Give motion validation the exact hierarchy and names used by this export.
+
+    Every joint has an animation track, so bind poses and skinning are not used
+    by the validator. First-frame transforms provide a consistent reference.
+    This skeleton stays in memory and never changes or writes the user's SKL.
+    """
+    rs = require_ritoshark()
+    joints = []
+    for pb in plan.bones:
+        t, s, r = joint_data[Hash.elf(plan.names[pb.name])][0]
+        q = rotations[r]
+        joints.append(rs.Joint(
+            plan.names[pb.name], plan.ids[pb.name],
+            plan.ids[pb.parent.name] if pb.parent else -1,
+            0.0, tuple(vectors[t]), tuple(vectors[s]), (q.x, q.y, q.z, q.w),
+            (0, 0, 0), (1, 1, 1), (0, 0, 0, 1)))
+    return rs.Skl.new(joints, [])
+
+
+def export_message(result, filepath):
+    if result.fallbacks:
+        return ({'WARNING'}, f'Exported ANM as {result.format.upper()} instead of '
+                f'{result.requested_format.upper()} to preserve motion: {filepath}. '
+                'Fallback details are in the console.')
+    return {'INFO'}, f'Exported ANM ({result.format.upper()}): {filepath}'
+
+
+def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False, visual_mode=False, use_scene_range=False, clean_names=True, anim_scale=1.0, apply_object_transform=True, export_format='v5'):
     """Sample every joint in the same current-parent frames as the paired SKL."""
     from .skeleton import ExportPlan
     if not armature_obj.animation_data or not armature_obj.animation_data.action:
         raise ValueError('No animation data found on armature')
-    if anim_scale <= 0 or fps <= 0:
+    if not math.isfinite(anim_scale) or not math.isfinite(fps) or anim_scale <= 0 or fps <= 0:
         raise ValueError('Animation scale and FPS must be positive')
     plan = ExportPlan(armature_obj, clean_names)
     plan.validate_offset_bind()
@@ -57,31 +85,28 @@ def write_anm(filepath, armature_obj, fps=30.0, disable_scaling=False, disable_t
                     add((r.x, r.y, r.z, r.w), quat_palette, quat_map)))
     finally:
         scene.frame_set(old_frame, subframe=old_subframe)
-    if max(len(vec_palette), len(quat_palette)) > 65535:
-        raise ValueError('Animation exceeds the ANM palette limit; shorten the frame range')
-    write_animation(filepath, fps, joint_data, vec_palette,
-                    [mathutils.Quaternion((q[3], q[0], q[1], q[2])) for q in quat_palette])
-    return True
+    rotations = [mathutils.Quaternion((q[3], q[0], q[1], q[2])) for q in quat_palette]
+    skeleton = _animation_skeleton(plan, joint_data, vec_palette, rotations)
+    return write_animation(filepath, fps, joint_data, vec_palette, rotations,
+                           export_format=export_format, skeleton=skeleton)
 
 
-def write_anm_from_data(filepath, anm_data, fps=None, disable_scaling=False):
-    """Write pre-corrected ANMData directly to a v4 uncompressed ANM file.
+def write_anm_from_data(filepath, anm_data, fps=None, disable_scaling=False, export_format='v5', skeleton=None):
+    """Write ANMData using the selected format and validated fallback policy.
 
     Translations in anm_data.tracks[*].poses[*].translation are expected to be
     in import-scale units (IMPORT_SCALE = 0.01 was applied at read time);
     this function scales them back to game units (x EXPORT_SCALE = 100).
 
-    This is used by the visual-armature batch processing path, which applies
-    bone-frame corrections directly to the raw pose data without touching the
-    Blender FK chain, ensuring translations and scales are preserved correctly
-    for is_custom_parent bones.
+    An optional Rust skeleton enables hierarchy-aware motion validation.
     """
     out_fps  = fps if fps is not None else anm_data.fps
+    if not math.isfinite(out_fps) or out_fps <= 0:
+        raise ValueError('Animation FPS must be positive')
     frame_count = anm_data.frame_count
 
     tracks_dict  = {t.joint_hash: t for t in anm_data.tracks}
     sorted_hashes = sorted(tracks_dict.keys())
-    joint_count  = len(sorted_hashes)
 
     vec_palette, vec_map   = [], {}
     quat_palette, quat_map = [], {}
@@ -122,23 +147,14 @@ def write_anm_from_data(filepath, anm_data, fps=None, disable_scaling=False):
             r_id = add_quat(r)
             frame_entries.append((h, t_id, s_id, r_id))
 
-    # Palette indices are stored as uint16, so the format caps each palette at 65535.
-    if len(vec_palette) > 65535 or len(quat_palette) > 65535:
-        raise Exception(
-            f"Animation too long for the ANM format: {len(vec_palette)} translation/scale "
-            f"values and {len(quat_palette)} rotations exceed the 65535 palette limit. "
-            f"Shorten the animation ({frame_count} frames)."
-        )
-
     joint_data = {h: [] for h in sorted_hashes}
     for h, t_id, s_id, r_id in frame_entries:
         joint_data[h].append((t_id, s_id, r_id))
-    write_animation(filepath, out_fps, joint_data, vec_palette, quat_palette)
+    return write_animation(filepath, out_fps, joint_data, vec_palette, quat_palette,
+                           export_format=export_format, skeleton=skeleton)
 
-    return True
 
-
-def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False, use_scene_range=True, clean_names=True, anim_scale=1.0, apply_object_transform=True):
+def save(operator, context, filepath, target_armature=None, disable_scaling=False, disable_transforms=False, flip=False, adapt_to_edits=False, use_scene_range=True, clean_names=True, anim_scale=1.0, apply_object_transform=True, export_format='v5'):
     armature_obj = target_armature
 
     if not armature_obj:
@@ -151,9 +167,9 @@ def save(operator, context, filepath, target_armature=None, disable_scaling=Fals
         return {'CANCELLED'}
 
     try:
-        fps = context.scene.render.fps
-        write_anm(filepath, armature_obj, fps, disable_scaling, disable_transforms, flip, adapt_to_edits=adapt_to_edits, use_scene_range=use_scene_range, clean_names=clean_names, anim_scale=anim_scale, apply_object_transform=apply_object_transform)
-        operator.report({'INFO'}, f"Exported ANM: {filepath}")
+        fps = context.scene.render.fps / context.scene.render.fps_base
+        result = write_anm(filepath, armature_obj, fps, disable_scaling, disable_transforms, flip, adapt_to_edits=adapt_to_edits, use_scene_range=use_scene_range, clean_names=clean_names, anim_scale=anim_scale, apply_object_transform=apply_object_transform, export_format=export_format)
+        operator.report(*export_message(result, filepath))
         return {'FINISHED'}
     except Exception as e:
         operator.report({'ERROR'}, f"Failed: {str(e)}")

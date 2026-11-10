@@ -222,7 +222,21 @@ class AnimTrack:
     frames: list[AnimFrame]
     def __init__(self, joint_hash: int, frames: list[AnimFrame]) -> None: ...
 
+class AnmExport:
+    @property
+    def bytes(self) -> bytes: ...
+    @property
+    def format(self) -> str: ...
+    @property
+    def requested_format(self) -> str: ...
+    @property
+    def fallbacks(self) -> list[tuple[str, str]]: ...
+    @property
+    def metrics(self) -> dict[str, float | None]: ...
+    def to_path(self, path: str) -> None: ...
+
 class Anm:
+    def export(self, format: str, *, skeleton: Skl | None = None, rotation_error: float = 0.034906585, translation_error: float = 0.5, scale_error: float = 0.005, model_space_error: float = 1.0) -> AnmExport: ...
     @staticmethod
     def from_path(path: str) -> Anm: ...
     @staticmethod
@@ -244,6 +258,35 @@ class Anm:
     def tracks(self) -> list[AnimTrack]: ...
     def to_bytes(self) -> bytes: ...
     def to_path(self, path: str) -> None: ...
+    def to_v5_bytes(self) -> bytes:
+        """Encode dense ANMD v5: float32 translation/scale and 48-bit normalized rotations.
+        Retains every frame. Does not change the normal byte-exact/default-v4 save policy.
+        Requires finite, equally sized nonempty tracks uniformly sampled from time zero."""
+    def to_v5_path(self, path: str) -> None:
+        """As to_v5_bytes; finishes encoding before opening the destination."""
+    def to_compressed_bytes(
+        self, *, rotation_error: float = 0.001,
+        translation_error: float = 0.05, scale_error: float = 0.001,
+        sample_subdivisions: int = 4, skeleton: Skl | None = None,
+        model_space_error: float = 0.1,
+    ) -> bytes:
+        """Encode CANM v1, ignoring preserved bytes without changing normal saves.
+        Rotation error is radians; translation/scale use maximum component error.
+        Checks a grid with sample_subdivisions intervals per source frame, against
+        linear vectors and shortest-path spherical rotations. This is not a continuous bound.
+        With skeleton, also bounds joint origins/unit-axis probes in model space,
+        tightening key reduction as needed. Unanimated joints retain rest transforms.
+        model_space_error is ignored without skeleton; it is not a mesh surface bound.
+        Raises WriteError for invalid input, a grid over 65536 samples, or unattainable
+        accuracy. Never silently relaxes tolerances or changes format."""
+    def to_compressed_path(
+        self, path: str, *, rotation_error: float = 0.001,
+        translation_error: float = 0.05, scale_error: float = 0.001,
+        sample_subdivisions: int = 4, skeleton: Skl | None = None,
+        model_space_error: float = 0.1,
+    ) -> None:
+        """As to_compressed_bytes; finishes encoding before opening the destination."""
+
 
 class Dds:
     @staticmethod
