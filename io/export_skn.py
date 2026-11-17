@@ -31,6 +31,69 @@ def clean_blender_name(name):
     return re.sub(r'\.\d{3}$', '', name)
 
 
+def _skin_metadata(mesh_objects):
+    """Preserve source metadata, accepting both ordinary SKN end-tab variants."""
+    metadata = {
+        (int(obj.get('lol_skn_flags', 0)),
+         base64.b64decode(obj.get('lol_skn_prefix', ''), validate=True),
+         base64.b64decode(obj.get('lol_skn_trailing', base64.b64encode(bytes(12))), validate=True))
+        for obj in mesh_objects if obj.type == 'MESH' and 'lol_skn_flags' in obj
+    }
+    if len(metadata) > 1:
+        # Some exporters omit the normal 12-byte zero end tab. That difference
+        # does not affect the geometry or skinning. Do not normalize any other
+        # opaque tail, prefix block or flag; its meaning may be significant.
+        metadata = {(flags, prefix, bytes(12) if tail in (b'', bytes(12)) else tail)
+                    for flags, prefix, tail in metadata}
+    if len(metadata) > 1:
+        raise ValueError('Selected meshes have incompatible SKN file metadata '
+                         '(flags, prefix or custom trailing data); export them separately. '
+                         'Joining meshes does not resolve these differences.')
+    return next(iter(metadata), (0, b'', bytes(12)))
+
+
+def _group_bone_indices(mesh_obj, bone_to_idx):
+    """Use the same exact-name/cleaned-name mapping for validation and export."""
+    result = {}
+    for group in mesh_obj.vertex_groups:
+        if group.name in bone_to_idx:
+            result[group.index] = bone_to_idx[group.name]
+        else:
+            cleaned = bone_utils.clean_export_bone_name(group.name)
+            if cleaned in bone_to_idx:
+                result[group.index] = bone_to_idx[cleaned]
+    return result
+
+
+def _validate_skin_weights(mesh_obj, armature_obj, bone_to_idx):
+    """Reject root fallbacks, but allow non-skin groups such as modifier masks."""
+    mapping = _group_bone_indices(mesh_obj, bone_to_idx)
+    unweighted = 0
+    ignored = set()
+    # Loose vertices are not exported. Check each face vertex only once.
+    for index in {loop.vertex_index for loop in mesh_obj.data.loops}:
+        weights = [g for g in mesh_obj.data.vertices[index].groups if g.weight > 0]
+        if not any(g.group in mapping for g in weights):
+            unweighted += 1
+        ignored.update(mesh_obj.vertex_groups[g.group].name for g in weights if g.group not in mapping)
+    names = ', '.join(sorted(ignored)[:8])
+    if len(ignored) > 8:
+        names += f' (+{len(ignored) - 8} more)'
+    if unweighted:
+        detail = f' Unmatched weighted groups: {names}.' if ignored else ''
+        raise ValueError(
+            f"Mesh '{mesh_obj.name}' has {unweighted} exported vertices with no positive "
+            f"bone weights in armature '{armature_obj.name}'.{detail} "
+            'Transfer the missing bones or reweight these vertices to the target skeleton; '
+            'joining meshes does not transfer bones.'
+        )
+    if ignored:
+        return (f"Mesh '{mesh_obj.name}': ignored weighted groups with no matching bone in "
+                f"'{armature_obj.name}': {names}. If these are skin weights, transfer the "
+                'bones or reweight; non-skin groups such as modifier masks can be ignored.')
+    return None
+
+
 def tangent_basis_signature(mesh):
     """Detect mesh edits that invalidate imported tangent attributes."""
     digest = hashlib.sha256()
@@ -108,14 +171,7 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
     # Exact name match takes priority â€” weights painted on "X.001" must reach
     # bone "X.001" when it exists, not leak onto native "X".  Cleaning strips
     # numeric suffixes only (.001), never at the first dot (Hand.L stays Hand.L).
-    group_to_bone_idx = {}
-    for group in mesh_obj.vertex_groups:
-        if group.name in bone_to_idx:
-            group_to_bone_idx[group.index] = bone_to_idx[group.name]
-        else:
-            clean_name = bone_utils.clean_export_bone_name(group.name)
-            if clean_name in bone_to_idx:
-                group_to_bone_idx[group.index] = bone_to_idx[clean_name]
+    group_to_bone_idx = _group_bone_indices(mesh_obj, bone_to_idx)
 
     # Get UV data
     if not mesh.uv_layers.active:
@@ -241,7 +297,7 @@ def collect_mesh_data(mesh_obj, armature_obj, bone_to_idx, submesh_name, materia
 
 
 @skin_normals.with_export_normals
-def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disable_scaling=False, disable_transforms=False, use_visual_pose=False, apply_object_transform=True, model_scale=1.0, influences=None, allow_shear=False):
+def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disable_scaling=False, disable_transforms=False, use_visual_pose=False, apply_object_transform=True, model_scale=1.0, influences=None, allow_shear=False, export_warnings=None):
     """Write multiple Blender meshes to a single SKN file with multiple submeshes"""
 
     if not armature_obj:
@@ -268,6 +324,17 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
             if cleaned != bone.name and cleaned not in bone_to_idx:
                 bone_to_idx[cleaned] = i
 
+    flags, prefix, trailing = _skin_metadata(mesh_objects)
+    for mesh_obj in mesh_objects:
+        if mesh_obj.type != 'MESH':
+            continue
+        warning = _validate_skin_weights(mesh_obj, armature_obj, bone_to_idx)
+        if warning:
+            if export_warnings is not None:
+                export_warnings.append(warning)
+            else:
+                print(f'[Aventurine] {warning}')
+
     # If use_visual_pose, evaluate meshes at frame 0 with armature deformation
     # This gives us vertex positions that match the new bind pose from the SKL
     deformed_data = {}
@@ -293,12 +360,6 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
             eval_obj.to_mesh_clear()
         bpy.context.scene.frame_set(current_frame)
 
-    source_metadata = {(int(obj.get('lol_skn_flags', 0)), obj.get('lol_skn_prefix', ''),
-                        obj.get('lol_skn_trailing', base64.b64encode(bytes(12)).decode('ascii')))
-                       for obj in mesh_objects if obj.type == 'MESH' and 'lol_skn_flags' in obj}
-    if len(source_metadata) > 1:
-        raise ValueError('Selected meshes have incompatible SKN file metadata; export them separately')
-    flags, prefix, trailing = next(iter(source_metadata), (0, '', base64.b64encode(bytes(12)).decode('ascii')))
     export_tangents = any(obj.get('lol_skn_has_tangents', False) for obj in mesh_objects)
     submesh_data = []
     total_vertex_count = 0
@@ -451,8 +512,7 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
                         for b, w in zip(v['inf'], v['weight'])]
 
     submesh_data = material_order.reorder_submeshes(submesh_data, armature_obj, mesh_objects)
-    write_skin(filepath, submesh_data, flags=flags, prefix_block=base64.b64decode(prefix, validate=True),
-               trailing=base64.b64decode(trailing, validate=True))
+    write_skin(filepath, submesh_data, flags=flags, prefix_block=prefix, trailing=trailing)
 
     return len(submesh_data), total_vertex_count, influences
 
@@ -505,7 +565,8 @@ def save(operator, context, filepath, export_skl_file=True, clean_names=True, ta
     try:
         from .skeleton import ExportPlan
         palette = None if export_skl_file else ExportPlan(armature_obj, clean_names).skin_palette()
-        submesh_count, vertex_count, skn_influences = write_skn_multi(filepath, mesh_objects, armature_obj, clean_names, disable_scaling, disable_transforms, use_visual_pose, apply_object_transform=apply_object_transform, model_scale=model_scale, influences=palette, allow_shear=allow_shear)
+        export_warnings = []
+        submesh_count, vertex_count, skn_influences = write_skn_multi(filepath, mesh_objects, armature_obj, clean_names, disable_scaling, disable_transforms, use_visual_pose, apply_object_transform=apply_object_transform, model_scale=model_scale, influences=palette, allow_shear=allow_shear, export_warnings=export_warnings)
         operator.report({'INFO'}, f"Exported SKN: {submesh_count} submeshes, {vertex_count} vertices, {len(skn_influences)} bone influences")
 
         if export_skl_file and armature_obj:
@@ -516,6 +577,8 @@ def save(operator, context, filepath, export_skl_file=True, clean_names=True, ta
                                  influences=skn_influences, allow_shear=allow_shear)
             operator.report({'INFO'}, f"Exported matching SKL: {skl_path}")
             
+        for warning in export_warnings:
+            operator.report({'WARNING'}, warning)
         if allow_shear:
             operator.report({'WARNING'}, 'Shear check bypassed; exported bones may deform differently. Verify the model in game.')
         if any(pb.get('lol_offset_companion_of') for pb in armature_obj.pose.bones):

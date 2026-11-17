@@ -23,6 +23,15 @@ Import an SKN to load a mesh, with options to load its matching SKL, separate it
 
 Select the armature to export its meshes, or select the meshes you intend to export. Export a matching SKN and SKL together after changing the skeleton or skinning palette. The exporter writes SKN **4.1** with bounds calculated from the exported geometry.
 
+When combining parts from different characters, transfer the required bones into the
+target armature or reweight the added mesh to its bones. **Ctrl+J joins meshes, not
+skeletons.** Export stops if any face vertices have no positive weights to a bone in
+the target armature. Weighted groups without a matching bone are reported; if these
+are intentional modifier masks, the warning can be ignored. The usual empty and
+12-byte zero SKN endings can be combined; conflicting custom metadata still needs
+to be handled separately. Replace both the SKN and matching SKL in your mod after
+changing weights or bones, since the exported bone palette may change.
+
 SKN export supports up to **31 nonempty submesh/material sections**. Exports with 32 or
 more are blocked because they can render invisible in game. Merge sections before
 exporting; unused Blender material slots do not count. Larger SKNs can still be imported.

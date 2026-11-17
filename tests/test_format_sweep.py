@@ -17,9 +17,10 @@ from test_material_order import MaterialOrderChecks
 from test_skin_normals import SkinNormalChecks
 from test_skeleton_import import SkeletonImportChecks
 from test_animation_export import AnimationExportChecks
+from test_skin_export_validation import SkinExportValidationChecks
 
 
-class FormatSweepTests(AnimationExportChecks, SkeletonImportChecks, SkinNormalChecks, MaterialOrderChecks, RestPoseChecks, BackendTests):
+class FormatSweepTests(SkinExportValidationChecks, AnimationExportChecks, SkeletonImportChecks, SkinNormalChecks, MaterialOrderChecks, RestPoseChecks, BackendTests):
     def test_texture_failures_are_reported_in_blender(self):
         from aventurine.utils import texture_manager
         messages = []
