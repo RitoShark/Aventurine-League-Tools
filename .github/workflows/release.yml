@@ -45,8 +45,17 @@ jobs:
   build:
     needs: prepare
     if: needs.prepare.outputs.build == 'true'
-    runs-on: windows-latest
-    timeout-minutes: 40
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: ubuntu-22.04
+            platform: linux-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     env:
       RUSTUP_TOOLCHAIN: ${{ needs.prepare.outputs.rust_toolchain }}
       PYTHONDONTWRITEBYTECODE: '1'
@@ -68,7 +77,13 @@ jobs:
       - name: Apply verified local library fixes
         run: python addon/scripts/release.py patch --library library
       - name: Install Rust
-        run: rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+        shell: bash
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Install Linux Blender runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxrender1 libxi6 libxkbcommon0 libsm6 libxxf86vm1 libxfixes3 libxcursor1 libxinerama1 libxrandr2
       - name: Cache Rust dependencies and build outputs
         uses: actions/cache@v4
         with:
@@ -76,19 +91,27 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             library/target
-          key: windows-rust-python311-${{ hashFiles('library/Cargo.lock', 'addon/rust-build.json', 'addon/vendor/ritoshark-source.patch') }}
-          restore-keys: windows-rust-python311-
+            library/target-manylinux
+          key: ${{ matrix.platform }}-rust-python311-${{ hashFiles('library/Cargo.lock', 'addon/rust-build.json', 'addon/vendor/ritoshark-source.patch') }}
+          restore-keys: ${{ matrix.platform }}-rust-python311-
       - name: Install build and test tools
         run: python -m pip install maturin==1.15.0 "pytest>=8,<10" bpy==4.2.0
       - name: Build Windows x64 Rust extension
+        if: runner.os == 'Windows'
         run: maturin build --release --locked --manifest-path library/crates/rs_python/Cargo.toml --interpreter python --out wheels
+      - name: Build experimental Linux x64 Rust extension
+        if: runner.os == 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: v1.15.0
+          rust-toolchain: ${{ needs.prepare.outputs.rust_toolchain }}
+          target: x86_64-unknown-linux-gnu
+          manylinux: '2_28'
+          args: >-
+            --release --locked --manifest-path library/crates/rs_python/Cargo.toml
+            --interpreter python3.11 --out wheels --target-dir library/target-manylinux
       - name: Vendor and install the freshly built wheel
-        shell: pwsh
-        run: |
-          python addon/scripts/release.py vendor --wheels wheels
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $wheel = Get-ChildItem -LiteralPath wheels -Filter '*win_amd64.whl'
-          python -m pip install --force-reinstall $wheel.FullName
+        run: python addon/scripts/release.py vendor --wheels wheels --install
       - name: Test Rust mesh and animation formats
         run: cargo test --release --locked --manifest-path library/Cargo.toml -p rs_mesh -p rs_anim
       - name: Test Rust Python bindings
@@ -101,7 +124,7 @@ jobs:
         run: python addon/scripts/package_addon.py --smoke-dir dist
       - uses: actions/upload-artifact@v4
         with:
-          name: Aventurine-${{ needs.prepare.outputs.version }}-windows-x64
+          name: Aventurine-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}
           path: dist/Aventurine-*.zip
           if-no-files-found: error
           retention-days: 14
@@ -118,7 +141,8 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          name: Aventurine-${{ needs.prepare.outputs.version }}-windows-x64
+          pattern: Aventurine-${{ needs.prepare.outputs.version }}-*
+          merge-multiple: true
           path: dist
       - name: Create release with the pushed commit message
         env:
@@ -126,5 +150,10 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           git log -1 --format=%B > release-notes.txt
-          gh release create "$VERSION" "dist/Aventurine-${VERSION}.zip" \
+          cat >> release-notes.txt <<'NOTES'
+
+          Linux x64 is experimental and has not been manually tested. Automated binding, Blender import/export and addon registration checks run in CI.
+          Windows: Aventurine-VERSION.zip. Linux: Aventurine-VERSION-linux-x64.zip (glibc 2.28 or newer).
+          NOTES
+          gh release create "$VERSION" "dist/Aventurine-${VERSION}.zip" "dist/Aventurine-${VERSION}-linux-x64.zip" \
             --target "$GITHUB_SHA" --title "$VERSION" --notes-file release-notes.txt

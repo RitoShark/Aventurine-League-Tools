@@ -10,6 +10,7 @@ import tempfile
 import zipfile
 
 from release import ROOT, read_version, source_config
+from native_platform import bundle_platform, native_module
 
 
 # Repository/working assets, not part of the installed Blender add-on.
@@ -30,15 +31,20 @@ def package(root, output_dir):
     if any(desired.get(key) != bundled.get(key) for key in ('source_commit', 'source_patch', 'source_patch_sha256')):
         raise ValueError('The bundled extension is stale; rebuild and vendor the configured Rust source')
     version = '.'.join(map(str, read_version((root / '__init__.py').read_text(encoding='utf-8'))))
-    if not (root / 'vendor/ritoshark/ritoshark.pyd').is_file():
-        raise ValueError('Build and vendor the Windows extension before packaging')
+    target = bundle_platform(bundled)
+    native_module([p.relative_to(root / 'vendor').as_posix()
+                   for p in (root / 'vendor').rglob('*') if p.is_file()], target)
+    if not (root / 'vendor/ritoshark/__init__.py').is_file():
+        raise ValueError('The bundled Rust Python package is missing its __init__.py')
     files = [root / name for name in ('__init__.py', 'LICENSE', 'README.md', 'THIRD_PARTY_LICENSES.md')]
     for directory in ('io', 'ui', 'utils', 'extras', 'tools', 'icons', 'vendor', 'docs'):
         files.extend(p for p in (root / directory).rglob('*') if p.is_file()
                      and '__pycache__' not in p.parts and p.suffix not in ('.pyc', '.pyo')
                      and p.relative_to(root).as_posix() not in REPOSITORY_ONLY_FILES)
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f'Aventurine-{version}.zip'
+    # Keep the Windows filename recognized by already-installed updater versions.
+    suffix = '' if target == 'windows-x64' else f'-{target}'
+    path = output_dir / f'Aventurine-{version}{suffix}.zip'
     with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for file in sorted(files):
             archive.write(file, 'Aventurine/' + file.relative_to(root).as_posix())

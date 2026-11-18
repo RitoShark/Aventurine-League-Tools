@@ -7,6 +7,9 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
+
+from native_platform import host_platform, wheel_platform
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,11 +64,26 @@ def source_config(root):
     return commit.lower(), patch
 
 
+def select_wheel(directory, target=None):
+    target = target or host_platform()
+    matches = []
+    for wheel in Path(directory).glob('*.whl'):
+        try:
+            if wheel_platform(wheel.name) == target:
+                matches.append(wheel)
+        except ValueError:
+            continue
+    if len(matches) != 1:
+        raise ValueError(f'Expected exactly one freshly built {target} RitoShark ABI3 wheel')
+    return matches[0]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['plan', 'patch', 'vendor'])
     parser.add_argument('--library', type=Path)
     parser.add_argument('--wheels', type=Path)
+    parser.add_argument('--install', action='store_true', help='Also install the selected wheel into this CI Python environment')
     args = parser.parse_args()
     commit, patch = source_config(ROOT)
     if args.command == 'plan':
@@ -88,10 +106,12 @@ def main():
         print(f'Prepared Rust source at {commit}')
     else:
         from vendor_ritoshark import vendor
-        wheels = list(args.wheels.glob('*-abi3-win_amd64.whl')) if args.wheels else []
-        if len(wheels) != 1:
-            raise ValueError('Expected exactly one freshly built Windows x64 ABI3 wheel')
-        print(json.dumps(vendor(wheels[0], ROOT / 'vendor', commit, patch), indent=2))
+        if not args.wheels:
+            parser.error('vendor requires --wheels')
+        wheel = select_wheel(args.wheels)
+        print(json.dumps(vendor(wheel, ROOT / 'vendor', commit, patch), indent=2))
+        if args.install:
+            subprocess.run([sys.executable, '-m', 'pip', 'install', '--force-reinstall', str(wheel)], check=True)
 
 
 if __name__ == '__main__':

@@ -10,6 +10,7 @@ Import, edit and export League of Legends models and animations directly in Blen
 
 ![Blender](https://img.shields.io/badge/Blender-4.0+-E87D0D?style=flat-square&logo=blender&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows_x64-168B77?style=flat-square)
+![Linux](https://img.shields.io/badge/Linux_x64-Experimental-E0A526?style=flat-square)
 [![License](https://img.shields.io/badge/License-GPLv3-blue?style=flat-square)](LICENSE)
 
 [Download](#download) · [Features](#features) · [User guide](docs/guide.md) · [Development guide](docs/development.md)
@@ -118,9 +119,12 @@ MAPGEO has its own optional **Aventurine MapGeo** tab. Map exports preserve spat
 
 ## Download
 
-Download **Aventurine-VERSION.zip** from the [releases page](https://github.com/RitoShark/Aventurine-League-Tools/releases) and install it through **Edit > Preferences > Add-ons** in Blender.
+Download the ZIP for your platform from the [releases page](https://github.com/RitoShark/Aventurine-League-Tools/releases) and install it through **Edit > Preferences > Add-ons** in Blender.
 
-The packaged add-on supports **Windows x64 and Blender 4.0+**. Rust is included; no compiler or separate converter is needed.
+- **Windows x64:** `Aventurine-VERSION.zip`
+- **Linux x64 (experimental):** `Aventurine-VERSION-linux-x64.zip`, for glibc 2.28 or newer. Not manually tested; Linux feedback is welcome.
+
+Requires **Blender 4.0+**. Rust is included; no compiler or separate converter is needed.
 
 Press **N** in the 3D Viewport to find **Aventurine LoL**. Enable extra panels under **Misc LoL Tools** in the add-on preferences. Restart Blender after updating.
 

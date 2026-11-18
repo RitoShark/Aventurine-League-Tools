@@ -3,11 +3,18 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import sys
+import types
 import unittest
 from unittest.mock import patch
 import zipfile
 
-spec = importlib.util.spec_from_file_location('update_install', Path(__file__).resolve().parents[1] / 'tools/update_install.py')
+# Load the updater's relative utility imports without importing bpy/__init__.py.
+root = Path(__file__).resolve().parents[1]
+namespace = types.ModuleType('_aventurine_updater_tests')
+namespace.__path__ = [str(root)]
+sys.modules[namespace.__name__] = namespace
+spec = importlib.util.spec_from_file_location(namespace.__name__ + '.tools.update_install', root / 'tools/update_install.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
 
@@ -23,12 +30,17 @@ class UpdaterTests(unittest.TestCase):
         self.zip = self.root / 'update.zip'
         self.archive()
 
-    def archive(self, extra=None, native=True):
+    def archive(self, extra=None, native=True, target=None, module=None, wheel=None):
+        target = target or updater.host_platform()
+        self.module = module or ('ritoshark.pyd' if target == 'windows-x64' else 'ritoshark.abi3.so')
+        wheel = wheel or ('ritoshark-0.1.0-cp39-abi3-win_amd64.whl' if target == 'windows-x64'
+                          else 'ritoshark-0.1.0-cp39-abi3-manylinux_2_28_x86_64.whl')
         with zipfile.ZipFile(self.zip, 'w') as z:
             z.writestr('Aventurine/__init__.py', "bl_info = {'version': (3, 2, 1)}\n")
-            z.writestr('Aventurine/vendor/wheel.json', json.dumps({'wheel': 'ritoshark-0.1.0-cp39-abi3-win_amd64.whl'}))
+            z.writestr('Aventurine/vendor/wheel.json', json.dumps({'wheel': wheel}))
+            z.writestr('Aventurine/vendor/ritoshark/__init__.py', 'from .ritoshark import *\n')
             if native:
-                z.writestr('Aventurine/vendor/ritoshark/ritoshark.pyd', b'new native module')
+                z.writestr('Aventurine/vendor/ritoshark/' + self.module, b'new native module')
             if extra:
                 z.writestr(extra, 'unwanted')
 
@@ -44,7 +56,42 @@ class UpdaterTests(unittest.TestCase):
     def test_swap_keeps_complete_old_installation(self):
         backup = updater.install_release(self.zip, self.target, '3.2.1')
         self.assertEqual((backup / '__init__.py').read_text(), 'old installation')
-        self.assertTrue((self.target / 'vendor/ritoshark/ritoshark.pyd').is_file())
+        self.assertTrue((self.target / 'vendor/ritoshark' / self.module).is_file())
+
+    def test_linux_selects_its_asset_and_never_falls_back_to_windows(self):
+        windows = {'name': 'Aventurine-3.2.1.zip', 'browser_download_url': 'https://example.invalid/windows.zip'}
+        linux = {'name': 'Aventurine-3.2.1-linux-x64.zip', 'browser_download_url': 'https://example.invalid/linux.zip'}
+        release = {'tag_name': 'v3.2.1', 'assets': [windows, linux]}
+        self.assertTrue(updater.release_asset(release, 'Linux', 'x86_64').endswith('/linux.zip'))
+        self.assertTrue(updater.release_asset(release, 'Windows', 'AMD64').endswith('/windows.zip'))
+        release['assets'] = [windows]
+        with self.assertRaisesRegex(ValueError, 'no packaged linux-x64'):
+            updater.release_asset(release, 'Linux', 'x86_64')
+        with self.assertRaises(ValueError):
+            updater.release_asset(release, 'Linux', 'aarch64')
+
+    def test_both_platform_archives_validate_and_reject_the_wrong_os(self):
+        for target, system in [('windows-x64', 'Windows'), ('linux-x64', 'Linux')]:
+            with self.subTest(target=target):
+                self.archive(target=target)
+                destination = self.root / target
+                result = updater.unpack_release(self.zip, destination, '3.2.1', system, 'x86_64')
+                self.assertTrue((result / 'vendor/ritoshark' / self.module).is_file())
+                wrong = self.root / (target + '-wrong')
+                with self.assertRaisesRegex(ValueError, 'incompatible Rust wheel'):
+                    updater.unpack_release(self.zip, wrong, '3.2.1', 'Linux' if system == 'Windows' else 'Windows', 'x86_64')
+                self.assertFalse(wrong.exists())
+
+    def test_wrong_or_mixed_native_modules_are_rejected_before_extracting(self):
+        for module, extra in [('ritoshark.pyd', None),
+                              ('ritoshark.abi3.so', 'Aventurine/vendor/ritoshark/ritoshark.pyd'),
+                              ('ritoshark.cpython-311-x86_64-linux-gnu.so', None)]:
+            with self.subTest(module=module, extra=extra):
+                self.archive(target='linux-x64', module=module, extra=extra)
+                dest = self.root / 'bad-native'
+                with self.assertRaisesRegex(ValueError, 'incompatible or mixed'):
+                    updater.unpack_release(self.zip, dest, '3.2.1', 'Linux', 'x86_64')
+                self.assertFalse(dest.exists())
 
     def test_locked_installation_is_not_overwritten(self):
         with patch.object(Path, 'rename', side_effect=PermissionError('DLL locked')):

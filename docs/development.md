@@ -8,7 +8,8 @@ Build, native dependency and release instructions for maintainers. Users install
 
 **Compatibility**
 - Blender 4.0 or newer
-- Release ZIPs bundle the Windows x64 RitoShark binding (CPython 3.9+ abi3)
+- Release ZIPs bundle an OS-specific RitoShark binding (CPython 3.9+ abi3)
+- Windows x64; experimental Linux x64 with glibc 2.28 or newer (not manually tested)
 - Supports multiple SKN format versions
 - Cross-compatible with League of Legends game files
 
@@ -63,13 +64,13 @@ To record a locally patched build, add `--source-patch path/to/source.patch` to 
 
 ## Automatic Rust releases
 
-The `Release` GitHub Actions workflow retains the version-bump release flow for Windows x64:
+The `Release` GitHub Actions workflow retains the version-bump release flow and builds Windows x64 and experimental Linux x64 together:
 
 1. Increase `bl_info["version"]` in `__init__.py` (for example, `4.0.1` to `4.0.2`).
 2. Commit with the desired release notes in the commit message, then push or merge to `main`.
-3. GitHub checks out the Rust commit configured in `rust-build.json`, verifies and applies its optional source patch, and builds a fresh ABI3 extension on a Windows runner.
-4. Binding tests, Blender 4.2 integration tests and an extracted-ZIP registration check must pass before publication. Sample-dependent library tests skip when their fixtures are absent; the optional Lemon-reader test skips unless its source path is supplied.
-5. GitHub publishes `Aventurine-VERSION.zip`. The release body is the full message of the pushed HEAD commit (the merge/squash commit when applicable), and the release tag points to that exact commit.
+3. Each platform checks out the Rust commit configured in `rust-build.json`, verifies and applies its optional source patch, and builds a fresh ABI3 extension. Linux uses a manylinux 2.28 container to avoid depending on the runner's newer glibc; it is tested on Ubuntu 22.04.
+4. Binding tests, Blender 4.2 integration tests and an extracted-ZIP registration check must pass on both platforms before publication. Sample-dependent library tests skip when their fixtures are absent; the optional Lemon-reader test skips unless its source path is supplied. Automated checks do not replace manual Linux viewport or in-game testing.
+5. GitHub publishes `Aventurine-VERSION.zip` for Windows (retaining compatibility with existing updaters) and `Aventurine-VERSION-linux-x64.zip` for Linux. The release body contains the full message of the pushed HEAD commit plus the experimental Linux notice. The release tag points to that exact commit.
 
 Pushing without increasing the version does not publish. Existing version tags/releases are left intact. Builds also upload a downloadable Actions artifact, retained for 14 days. To retry a failed release attempt, rerun its original workflow run; after changing code, run the workflow on `main` with **publish** enabled to release that same version. An existing tag is never replaced; if publication already created a tag, rerun the original failed publish job.
 
@@ -79,14 +80,14 @@ For Python-only changes, no library changes are needed. For Rust changes, either
 
 `rust-build.json` selects the source for the next build. `vendor/wheel.json` records the provenance of the extension currently bundled in the checkout; CI refreshes this record in its release ZIP. Editing the build configuration does not change the local DLL. You do not need to commit a newly compiled DLL for GitHub to build a release.
 
-The build uses Python 3.11, the Rust compiler version pinned in `rust-build.json`, Maturin 1.15.0 and Cargo's lockfile. Rust and Blender test dependencies are installed on GitHub's runner. The downloadable add-on contains the native extension, Python code and licenses, without the build toolchain. Linux and macOS builds are not configured.
+The build uses Python 3.11, the Rust compiler version pinned in `rust-build.json`, Maturin 1.15.0 and Cargo's lockfile. Rust and Blender test dependencies are installed on GitHub's runner. The downloadable add-on contains the native extension, Python code and licenses, without the build toolchain. macOS, ARM and musl Linux builds are not configured.
 
-For a local ZIP after vendoring the matching Windows wheel, run `python scripts/package_addon.py --output-dir dist`. The packager checks source provenance and uses an explicit runtime-file list, excluding tests, caches, unrelated local projects, README wordmark working assets and local investigation notes. Blender UI icons and user guides remain included. `python tests/test_release.py -v` validates the release conditions without Blender.
+For a local ZIP after vendoring the matching wheel, run `python scripts/package_addon.py --output-dir dist`. The packager chooses the filename from the wheel platform, checks source provenance and rejects missing or mixed native modules. Vendoring replaces the previous native package, copies any `ritoshark.libs` dependencies, and keeps the license directory. Packaging uses an explicit runtime-file list, excluding tests, caches, unrelated local projects, README wordmark working assets and local investigation notes. Blender UI icons and user guides remain included. `python tests/test_release.py -v` validates the release conditions without Blender.
 
 
 ### One-command local build
 
-With Python 3.11 and `bpy==4.2.0` available:
+The one-command local build currently targets Windows x64. With Python 3.11 and `bpy==4.2.0` available:
 
 ```powershell
 python scripts/build.py --library ..\RitoShark-Crates-Aventurine --output-dir dist
@@ -102,4 +103,4 @@ Git, Rust/rustup and Visual Studio C++ Build Tools must be installed. The script
 
 The command runs Rust mesh tests, Python binding tests, the Blender format suite and ZIP registration checks before refreshing the checkout's bundled extension/provenance and writing the ZIP. Temporary tools and compiler output are deleted, including on failure; Cargo's shared downloaded dependency cache remains. The script updates the development checkout, not Blender's installed add-on. Restart Blender after installing the resulting ZIP.
 
-Pull requests and pushes to `main` or `codex/**` now use this same build command, exercising a freshly built Rust extension and the full fixture-free Blender suite. CI artifacts are retained for seven days. Local optional Seraphine/reference fixtures are not uploaded. Run `python tests/test_updater.py -v` and `python tests/test_release.py -v` for the dependency-free updater/build-flow checks.
+Pull requests and pushes to `main` or `codex/**` use this same Windows build command, exercising a freshly built Rust extension and the full fixture-free Blender suite. Linux builds run in the `Release` workflow on version increases or manual runs. CI artifacts from `Backend tests` are retained for seven days. Local optional Seraphine/reference fixtures are not uploaded. Run `python tests/test_updater.py -v` and `python tests/test_release.py -v` for the dependency-free updater/build-flow checks.

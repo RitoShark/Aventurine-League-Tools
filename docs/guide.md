@@ -4,7 +4,10 @@
 
 ## Installation and updates
 
-Use the packaged **Aventurine-VERSION.zip**, rather than GitHub's source-code ZIP. The bundled native extension supports Windows x64; Blender 4.0 or newer is required.
+Use the packaged ZIP for your operating system, rather than GitHub's source-code ZIP.
+Windows x64 uses **Aventurine-VERSION.zip**. Linux x64 uses
+**Aventurine-VERSION-linux-x64.zip** and requires glibc 2.28 or newer. Linux support
+is experimental and has not been manually tested. Blender 4.0 or newer is required.
 
 1. Download the ZIP from the [releases page](https://github.com/RitoShark/Aventurine-League-Tools/releases).
 2. Open **Edit > Preferences > Add-ons**, use **Install...** or **Install from Disk...** depending on your Blender version, and select the ZIP.
@@ -13,7 +16,7 @@ Use the packaged **Aventurine-VERSION.zip**, rather than GitHub's source-code ZI
 
 The main import/export tools are in **Aventurine LoL**. Enable individual extras under **Misc LoL Tools** in the add-on preferences. MAPGEO has a separate optional **Aventurine MapGeo** tab, and UV helpers appear in the UV Editor's **UV Tools** tab.
 
-Use **Check for Updates** in the add-on preferences to install updates, then restart Blender. The updater validates the packaged Windows ZIP before swapping folders. If Windows locks the installation, close Blender and install the ZIP manually; the loaded Rust DLL is never overwritten in place.
+Use **Check for Updates** in the add-on preferences to install updates, then restart Blender. The updater selects and validates the ZIP for your OS before swapping folders. If Windows locks the installation, close Blender and install the ZIP manually; the loaded Rust module is never overwritten in place.
 
 ## Import and export
 

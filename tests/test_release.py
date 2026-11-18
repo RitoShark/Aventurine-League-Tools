@@ -9,9 +9,11 @@ import unittest
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from release import read_version, release_plan, source_config
+from release import read_version, release_plan, source_config, select_wheel
 from package_addon import package
 from build import snapshot_patch
+from vendor_ritoshark import vendor
+from native_platform import host_platform, wheel_platform
 
 
 class ReleaseTests(unittest.TestCase):
@@ -38,6 +40,7 @@ class ReleaseTests(unittest.TestCase):
         vendor.mkdir(exist_ok=True)
         (vendor / 'ritoshark-source.patch').write_bytes(b'test patch\n')
         metadata = {'source_commit': 'a' * 40, 'source_patch': 'ritoshark-source.patch',
+                    'wheel': 'ritoshark-0.1.0-cp39-abi3-win_amd64.whl',
                     'source_patch_sha256': hashlib.sha256(b'test patch\n').hexdigest()}
         (vendor / 'wheel.json').write_text(json.dumps(metadata))
         (self.root / 'rust-build.json').write_text(json.dumps(metadata))
@@ -90,6 +93,7 @@ class ReleaseTests(unittest.TestCase):
     def test_package_includes_runtime_and_excludes_local_projects(self):
         self.source()
         for name in ('LICENSE', 'README.md', 'THIRD_PARTY_LICENSES.md', 'vendor/ritoshark/ritoshark.pyd',
+                     'vendor/ritoshark/__init__.py',
                      'vendor/licenses/LICENSE-MIT', 'io/example.py', 'io/__pycache__/example.pyc',
                      'tests/test_example.py', 'unrelated-project/private.txt', '.git/ignored.txt',
                      'docs/guide.md', 'icons/50.png',
@@ -126,6 +130,77 @@ class ReleaseTests(unittest.TestCase):
         (self.root / 'rust-build.json').write_text(json.dumps(config))
         with self.assertRaisesRegex(ValueError, 'stale'):
             package(self.root, self.root / 'dist')
+
+    def test_linux_package_is_named_separately_and_includes_shared_libraries(self):
+        self.source()
+        record = self.root / 'vendor/wheel.json'
+        metadata = json.loads(record.read_text())
+        metadata['wheel'] = 'ritoshark-0.1.0-cp39-abi3-manylinux_2_28_x86_64.whl'
+        metadata['platform'] = 'linux-x64'
+        record.write_text(json.dumps(metadata))
+        for name in ('LICENSE', 'README.md', 'THIRD_PARTY_LICENSES.md',
+                     'vendor/ritoshark/__init__.py', 'vendor/ritoshark/ritoshark.abi3.so',
+                     'vendor/ritoshark.libs/libdependency.so'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'fixture')
+        archive = package(self.root, self.root / 'dist')
+        self.assertEqual(archive.name, 'Aventurine-3.2.0-linux-x64.zip')
+        with zipfile.ZipFile(archive) as z:
+            self.assertIn('Aventurine/vendor/ritoshark/ritoshark.abi3.so', z.namelist())
+            self.assertIn('Aventurine/vendor/ritoshark.libs/libdependency.so', z.namelist())
+            self.assertFalse(any(name.endswith('.pyd') for name in z.namelist()))
+        (self.root / 'vendor/ritoshark/ritoshark.pyd').write_bytes(b'wrong OS')
+        with self.assertRaisesRegex(ValueError, 'mixed'):
+            package(self.root, self.root / 'mixed')
+
+    def test_platform_and_abi_checks_reject_unsupported_builds(self):
+        self.assertEqual(host_platform('Linux', 'x86_64'), 'linux-x64')
+        self.assertEqual(host_platform('Windows', 'AMD64'), 'windows-x64')
+        self.assertEqual(wheel_platform('ritoshark-0.1.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl'), 'linux-x64')
+        for name in ('ritoshark-0.1.0-cp311-cp311-linux_x86_64.whl',
+                     'ritoshark-0.1.0-cp39-abi3-manylinux_2_28_aarch64.whl',
+                     'ritoshark-0.1.0-cp39-abi3-musllinux_1_2_x86_64.whl',
+                     'ritoshark-0.1.0-cp39-abi3-macosx_11_0_arm64.whl'):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                wheel_platform(name)
+
+    def test_wheel_selection_is_platform_specific_and_unambiguous(self):
+        windows = self.root / 'ritoshark-0.1.0-cp39-abi3-win_amd64.whl'
+        linux = self.root / 'ritoshark-0.1.0-cp39-abi3-manylinux_2_28_x86_64.whl'
+        windows.touch(); linux.touch()
+        self.assertEqual(select_wheel(self.root, 'windows-x64'), windows)
+        self.assertEqual(select_wheel(self.root, 'linux-x64'), linux)
+        (self.root / 'ritoshark-0.1.1-cp39-abi3-manylinux_2_28_x86_64.whl').touch()
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            select_wheel(self.root, 'linux-x64')
+
+    def test_vendoring_replaces_old_platform_and_keeps_linux_dependencies(self):
+        destination = self.root / 'vendor'
+        (destination / 'licenses').mkdir(parents=True)
+        (destination / 'licenses/LICENSE').write_text('keep')
+        for target, suffix, module in [('windows-x64', 'win_amd64', 'ritoshark.pyd'),
+                                       ('linux-x64', 'manylinux_2_28_x86_64', 'ritoshark.abi3.so'),
+                                       ('windows-x64', 'win_amd64', 'ritoshark.pyd')]:
+            wheel = self.root / f'ritoshark-0.1.0-cp39-abi3-{suffix}.whl'
+            with zipfile.ZipFile(wheel, 'w') as z:
+                z.writestr('ritoshark/__init__.py', 'from .ritoshark import *')
+                z.writestr('ritoshark/' + module, b'test module')
+                if target == 'linux-x64':
+                    z.writestr('ritoshark.libs/libdependency.so', b'library')
+            metadata = vendor(wheel, destination, 'a' * 40)
+            self.assertEqual(metadata['platform'], target)
+            self.assertEqual(sorted(p.name for p in (destination / 'ritoshark').iterdir()), ['__init__.py', module])
+            self.assertEqual((destination / 'ritoshark.libs/libdependency.so').exists(), target == 'linux-x64')
+            self.assertEqual((destination / 'licenses/LICENSE').read_text(), 'keep')
+        before = (destination / 'wheel.json').read_bytes()
+        with zipfile.ZipFile(wheel, 'w') as z:
+            z.writestr('ritoshark/__init__.py', '')
+            z.writestr('ritoshark/ritoshark.abi3.so', b'wrong OS')
+        with self.assertRaises(ValueError):
+            vendor(wheel, destination, 'a' * 40)
+        self.assertEqual((destination / 'wheel.json').read_bytes(), before)
+        self.assertTrue((destination / 'ritoshark/ritoshark.pyd').exists())
 
 
 if __name__ == '__main__':
