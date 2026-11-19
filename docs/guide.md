@@ -86,6 +86,10 @@ Two source rigs can hold separate actions and retarget onto a third rig in succe
 
 **Wiggle 2**, **Hair Physics** and **Boobs Physics** are optional Misc panels. The dedicated physics panels support preview/undo, collision controls and batch processing of animation folders. Choose an export folder for the baked clips. These are explicit animation-authoring tools; ordinary model export does not run them.
 
+## SKN vertex limits
+
+A single SKN can contain more than 65,536 vertices. Each exported submesh (a mesh/material section) must stay at or below 65,536 vertices, including any splits required by UVs or normals. Larger files automatically use submesh-relative indices. Split an oversized section into separate mesh objects or material sections; the existing limit of 31 sections per SKN still applies.
+
 ## SKN Material Order
 
 Select an armature or one of its bound meshes, then open **Misc LoL Tools > SKN Material Order**.

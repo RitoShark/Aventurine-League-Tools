@@ -12,6 +12,8 @@ from . import bone_utils, skin_normals, material_order
 # 32 ranges reproduced whole-model invisibility; Riot assets surveyed top out at 31.
 # This guards export only: larger source SKNs remain importable for repair.
 MAX_SKN_SUBMESHES = 31
+MAX_SKN_SUBMESH_VERTICES = 1 << 16  # uint16 indices: 0 through 65535
+SKN_RELATIVE_INDICES = 2
 
 def _corner_normals(mesh):
     if hasattr(mesh, 'calc_normals_split'):
@@ -39,6 +41,12 @@ def _skin_metadata(mesh_objects):
          base64.b64decode(obj.get('lol_skn_trailing', base64.b64encode(bytes(12))), validate=True))
         for obj in mesh_objects if obj.type == 'MESH' and 'lol_skn_flags' in obj
     }
+    # Import resolves indices to absolute vertex positions. Their original
+    # on-disk encoding can safely differ when combining meshes; preserve the
+    # relative flag if any source uses it, without changing other metadata.
+    relative_indices = any(flags & SKN_RELATIVE_INDICES for flags, _, _ in metadata)
+    metadata = {(flags & ~SKN_RELATIVE_INDICES, prefix, tail)
+                for flags, prefix, tail in metadata}
     if len(metadata) > 1:
         # Some exporters omit the normal 12-byte zero end tab. That difference
         # does not affect the geometry or skinning. Do not normalize any other
@@ -49,7 +57,10 @@ def _skin_metadata(mesh_objects):
         raise ValueError('Selected meshes have incompatible SKN file metadata '
                          '(flags, prefix or custom trailing data); export them separately. '
                          'Joining meshes does not resolve these differences.')
-    return next(iter(metadata), (0, b'', bytes(12)))
+    flags, prefix, trailing = next(iter(metadata), (0, b'', bytes(12)))
+    if relative_indices:
+        flags |= SKN_RELATIVE_INDICES
+    return flags, prefix, trailing
 
 
 def _group_bone_indices(mesh_obj, bone_to_idx):
@@ -460,8 +471,18 @@ def write_skn_multi(filepath, mesh_objects, armature_obj, clean_names=True, disa
         raise Exception("No geometry found to export")
     
     # Validate export limits before writing any data.
-    if total_vertex_count > 65535:
-        raise Exception(f"Too many vertices: {total_vertex_count}, max allowed: 65535. Reduce mesh complexity or split into multiple files.")
+    for submesh in submesh_data:
+        if submesh['vertex_count'] > MAX_SKN_SUBMESH_VERTICES:
+            raise ValueError(
+                f"SKN submesh '{submesh['name']}' has {submesh['vertex_count']:,} "
+                f"exported vertices after UV/normal splitting; maximum is "
+                f"{MAX_SKN_SUBMESH_VERTICES:,} per submesh. Split this section "
+                "into separate mesh objects or material sections before exporting."
+            )
+    if total_vertex_count > MAX_SKN_SUBMESH_VERTICES:
+        # Keep absolute indices through material reordering. The Rust writer
+        # subtracts each final range's vertex_start when this flag is set.
+        flags |= SKN_RELATIVE_INDICES
     
     if len(submesh_data) > MAX_SKN_SUBMESHES:
         raise ValueError(
@@ -579,6 +600,10 @@ def save(operator, context, filepath, export_skl_file=True, clean_names=True, ta
             
         for warning in export_warnings:
             operator.report({'WARNING'}, warning)
+        if vertex_count > MAX_SKN_SUBMESH_VERTICES:
+            operator.report({'WARNING'},
+                'Performance warning: Aim to keep fewer than 65k vertices visible at once. '
+                'Higher counts may reduce FPS.')
         if allow_shear:
             operator.report({'WARNING'}, 'Shear check bypassed; exported bones may deform differently. Verify the model in game.')
         if any(pb.get('lol_offset_companion_of') for pb in armature_obj.pose.bones):

@@ -61,7 +61,7 @@ class SkinExportValidationChecks:
         arm, obj = self._weight_fixture()
         other = self._mesh_copy(obj)
         original = {key: other[key] for key in ('lol_skn_flags', 'lol_skn_prefix', 'lol_skn_trailing')}
-        cases = [('lol_skn_flags', 2),
+        cases = [('lol_skn_flags', 4),
                  ('lol_skn_prefix', base64.b64encode(b'opaque').decode('ascii')),
                  ('lol_skn_trailing', base64.b64encode(bytes(24)).decode('ascii')),
                  ('lol_skn_trailing', base64.b64encode(bytes(11) + b'\x01').decode('ascii'))]
